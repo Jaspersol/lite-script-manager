@@ -1,0 +1,160 @@
+use crate::runner;
+use crate::state::AppState;
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{
+    AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
+
+const PANEL_LABEL: &str = "panel";
+const MAIN_LABEL: &str = "main";
+const PANEL_WIDTH: f64 = 368.0;
+const PANEL_HEIGHT: f64 = 486.0;
+
+pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
+    let show = MenuItem::with_id(app, "show", "Show LSM", true, None::<&str>)?;
+    let exit = MenuItem::with_id(app, "exit", "Exit LSM", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &exit])?;
+
+    let mut builder = TrayIconBuilder::with_id("lsm-tray")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .tooltip("LiteScriptManager")
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_panel(tray.app_handle());
+            }
+        })
+        .on_menu_event(|app, event| match event.id.as_ref() {
+            "show" => {
+                let _ = ensure_main(app);
+            }
+            "exit" => exit_app(app),
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder.build(app)?;
+    Ok(())
+}
+
+fn attach_close_behavior(window: &WebviewWindow) {
+    let window_for_event = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = window_for_event.destroy();
+        }
+    });
+}
+
+pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(window) = app.get_webview_window(PANEL_LABEL) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(window);
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        PANEL_LABEL,
+        WebviewUrl::App("panel.html".into()),
+    )
+    .title("LiteScriptManager")
+    .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .resizable(false)
+    .transparent(true)
+    .visible(false)
+    .build()?;
+
+    attach_close_behavior(&window);
+    let position = panel_position(app);
+    let _ = window.set_position(position);
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(window)
+}
+
+pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
+    if let Some(window) = app.get_webview_window(MAIN_LABEL) {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(window);
+    }
+
+    let window = WebviewWindowBuilder::new(
+        app,
+        MAIN_LABEL,
+        WebviewUrl::App("index.html".into()),
+    )
+    .title("LiteScriptManager")
+    .inner_size(1120.0, 760.0)
+    .min_inner_size(900.0, 620.0)
+    .center()
+    .visible(false)
+    .build()?;
+
+    attach_close_behavior(&window);
+    let _ = window.show();
+    let _ = window.set_focus();
+    Ok(window)
+}
+
+pub fn toggle_panel(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
+        let _ = main.unminimize();
+        let _ = main.show();
+        let _ = main.set_focus();
+        return;
+    }
+    if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
+        let _ = panel.destroy();
+    } else {
+        let _ = ensure_panel(app);
+    }
+}
+
+pub fn close_panel(app: &AppHandle) {
+    if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
+        let _ = panel.destroy();
+    }
+}
+
+pub fn close_main(app: &AppHandle) {
+    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
+        let _ = main.destroy();
+    }
+}
+
+pub fn exit_app(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.exiting.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    runner::stop_all(app);
+    app.exit(0);
+}
+
+fn panel_position(app: &AppHandle) -> PhysicalPosition<i32> {
+    let Some(monitor) = app.primary_monitor().ok().flatten() else {
+        return PhysicalPosition::new(100, 100);
+    };
+    let scale = monitor.scale_factor();
+    let work = monitor.work_area();
+    let width = (PANEL_WIDTH * scale) as i32;
+    let height = (PANEL_HEIGHT * scale) as i32;
+    let margin = (10.0 * scale) as i32;
+    let x = work.position.x + work.size.width as i32 - width - margin;
+    let y = work.position.y + work.size.height as i32 - height - margin;
+    PhysicalPosition::new(x.max(work.position.x), y.max(work.position.y))
+}
