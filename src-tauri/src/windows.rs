@@ -62,20 +62,16 @@ pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         return Ok(window);
     }
 
-    let window = WebviewWindowBuilder::new(
-        app,
-        PANEL_LABEL,
-        WebviewUrl::App("panel.html".into()),
-    )
-    .title("LiteScriptManager")
-    .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .resizable(false)
-    .transparent(true)
-    .visible(false)
-    .build()?;
+    let window = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel.html".into()))
+        .title("LiteScriptManager")
+        .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .transparent(true)
+        .visible(false)
+        .build()?;
 
     attach_close_behavior(&window);
     let position = panel_position(app);
@@ -93,17 +89,13 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         return Ok(window);
     }
 
-    let window = WebviewWindowBuilder::new(
-        app,
-        MAIN_LABEL,
-        WebviewUrl::App("index.html".into()),
-    )
-    .title("LiteScriptManager")
-    .inner_size(1120.0, 760.0)
-    .min_inner_size(900.0, 620.0)
-    .center()
-    .visible(false)
-    .build()?;
+    let window = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))
+        .title("LiteScriptManager")
+        .inner_size(1120.0, 760.0)
+        .min_inner_size(900.0, 620.0)
+        .center()
+        .visible(false)
+        .build()?;
 
     attach_close_behavior(&window);
     let _ = window.show();
@@ -139,7 +131,9 @@ pub fn close_main(app: &AppHandle) {
 
 pub fn exit_app(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
-        state.exiting.store(true, std::sync::atomic::Ordering::SeqCst);
+        state
+            .exiting
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
     runner::stop_all(app);
     app.exit(0);

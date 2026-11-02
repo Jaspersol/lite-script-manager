@@ -1,5 +1,5 @@
 use crate::models::Script;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
 pub fn now_ms() -> i64 {
@@ -25,6 +25,8 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
              args_json TEXT NOT NULL DEFAULT '[]',
              cwd TEXT,
              env_json TEXT NOT NULL DEFAULT '{}',
+             interpreter_path TEXT,
+             stop_timeout_sec INTEGER NOT NULL DEFAULT 3,
              sort_order INTEGER NOT NULL DEFAULT 0,
              enabled INTEGER NOT NULL DEFAULT 1,
              created_at INTEGER NOT NULL,
@@ -49,19 +51,51 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
          );",
     )
     .map_err(|e| format!("初始化数据库失败: {e}"))?;
+    // Add columns introduced after the first schema version.
+    add_column_if_missing(&conn, "scripts", "interpreter_path", "TEXT")?;
+    add_column_if_missing(
+        &conn,
+        "scripts",
+        "stop_timeout_sec",
+        "INTEGER NOT NULL DEFAULT 3",
+    )?;
     // Any run left as running from a previous process is no longer controllable.
     let _ = conn.execute(
         "UPDATE runs SET status='failed', error='应用上次退出时运行状态未正常结束', ended_at=?1
          WHERE status IN ('running','stopping')",
         params![now_ms()],
     );
+    set_setting(&conn, "app_version", env!("CARGO_PKG_VERSION"))?;
     Ok(conn)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), String> {
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name=?2",
+            params![table, column],
+            |row| row.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    if exists == 0 {
+        conn.execute(
+            &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+            [],
+        )
+        .map_err(|e| format!("升级数据库字段失败 ({column}): {e}"))?;
+    }
+    Ok(())
 }
 
 pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT id, name, path, runtime_id, args_json, cwd, env_json, sort_order, enabled, created_at, updated_at
+            "SELECT id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path, stop_timeout_sec, sort_order, enabled, created_at, updated_at
              FROM scripts ORDER BY sort_order ASC, created_at ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -77,10 +111,12 @@ pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
                 args: serde_json::from_str(&args_json).unwrap_or_default(),
                 cwd: row.get(5)?,
                 env: serde_json::from_str(&env_json).unwrap_or_default(),
-                sort_order: row.get(7)?,
-                enabled: row.get::<_, i64>(8)? != 0,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                interpreter_path: row.get(7)?,
+                stop_timeout_sec: row.get(8)?,
+                sort_order: row.get(9)?,
+                enabled: row.get::<_, i64>(10)? != 0,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
                 status: "stopped".into(),
                 last_error: None,
                 last_run_id: None,
@@ -126,8 +162,8 @@ pub fn get_script(conn: &Connection, id: &str) -> Result<Option<Script>, String>
 
 pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO scripts (id, name, path, runtime_id, args_json, cwd, env_json, sort_order, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        "INSERT INTO scripts (id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path, stop_timeout_sec, sort_order, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             script.id,
             script.name,
@@ -136,6 +172,8 @@ pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
             serde_json::to_string(&script.args).unwrap_or_else(|_| "[]".into()),
             script.cwd,
             serde_json::to_string(&script.env).unwrap_or_else(|_| "{}".into()),
+            script.interpreter_path,
+            script.stop_timeout_sec,
             script.sort_order,
             if script.enabled { 1 } else { 0 },
             script.created_at,
@@ -146,14 +184,25 @@ pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
     Ok(())
 }
 
-pub fn update_script(conn: &Connection, id: &str, name: &str, args: &[String], cwd: Option<&str>, enabled: bool) -> Result<(), String> {
+pub fn update_script(
+    conn: &Connection,
+    id: &str,
+    name: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    interpreter_path: Option<&str>,
+    stop_timeout_sec: i64,
+    enabled: bool,
+) -> Result<(), String> {
     conn.execute(
-        "UPDATE scripts SET name=?2, args_json=?3, cwd=?4, enabled=?5, updated_at=?6 WHERE id=?1",
+        "UPDATE scripts SET name=?2, args_json=?3, cwd=?4, interpreter_path=?5, stop_timeout_sec=?6, enabled=?7, updated_at=?8 WHERE id=?1",
         params![
             id,
             name,
             serde_json::to_string(args).unwrap_or_else(|_| "[]".into()),
             cwd,
+            interpreter_path,
+            stop_timeout_sec.max(1),
             if enabled { 1 } else { 0 },
             now_ms(),
         ],
@@ -171,26 +220,44 @@ pub fn delete_script(conn: &Connection, id: &str) -> Result<(), String> {
 pub fn reorder_scripts(conn: &mut Connection, ids: &[String]) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for (index, id) in ids.iter().enumerate() {
-        tx.execute("UPDATE scripts SET sort_order=?2, updated_at=?3 WHERE id=?1", params![id, index as i64, now_ms()])
-            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE scripts SET sort_order=?2, updated_at=?3 WHERE id=?1",
+            params![id, index as i64, now_ms()],
+        )
+        .map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub fn max_sort_order(conn: &Connection) -> Result<i64, String> {
-    conn.query_row("SELECT COALESCE(MAX(sort_order), -1) FROM scripts", [], |row| row.get(0))
-        .map_err(|e| e.to_string())
+    conn.query_row(
+        "SELECT COALESCE(MAX(sort_order), -1) FROM scripts",
+        [],
+        |row| row.get(0),
+    )
+    .map_err(|e| e.to_string())
 }
 
 pub fn path_exists(conn: &Connection, path: &str) -> Result<bool, String> {
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM scripts WHERE path=?1", params![path], |row| row.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM scripts WHERE path=?1",
+            params![path],
+            |row| row.get(0),
+        )
         .map_err(|e| e.to_string())?;
     Ok(count > 0)
 }
 
-pub fn insert_run(conn: &Connection, run_id: &str, script_id: &str, pid: Option<u32>, started_at: i64, log_path: &str) -> Result<(), String> {
+pub fn insert_run(
+    conn: &Connection,
+    run_id: &str,
+    script_id: &str,
+    pid: Option<u32>,
+    started_at: i64,
+    log_path: &str,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO runs (id, script_id, status, pid, started_at, log_path) VALUES (?1, ?2, 'running', ?3, ?4, ?5)",
         params![run_id, script_id, pid.map(|p| p as i64), started_at, log_path],
@@ -199,7 +266,13 @@ pub fn insert_run(conn: &Connection, run_id: &str, script_id: &str, pid: Option<
     Ok(())
 }
 
-pub fn finish_run(conn: &Connection, run_id: &str, status: &str, exit_code: Option<i32>, error: Option<&str>) -> Result<(), String> {
+pub fn finish_run(
+    conn: &Connection,
+    run_id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+    error: Option<&str>,
+) -> Result<(), String> {
     conn.execute(
         "UPDATE runs SET status=?2, ended_at=?3, exit_code=?4, error=?5 WHERE id=?1",
         params![run_id, status, now_ms(), exit_code, error],
@@ -209,9 +282,13 @@ pub fn finish_run(conn: &Connection, run_id: &str, status: &str, exit_code: Opti
 }
 
 pub fn get_run_log_path(conn: &Connection, run_id: &str) -> Result<Option<String>, String> {
-    conn.query_row("SELECT log_path FROM runs WHERE id=?1", params![run_id], |row| row.get(0))
-        .optional()
-        .map_err(|e| e.to_string())
+    conn.query_row(
+        "SELECT log_path FROM runs WHERE id=?1",
+        params![run_id],
+        |row| row.get(0),
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {

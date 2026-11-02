@@ -8,6 +8,8 @@ export interface Script {
   args: string[];
   cwd: string | null;
   env: Record<string, string>;
+  interpreter_path: string | null;
+  stop_timeout_sec: number;
   sort_order: number;
   enabled: boolean;
   created_at: number;
@@ -49,9 +51,13 @@ export interface RunStateEvent {
   ended_at: number | null;
 }
 
-export interface LogEvent {
-  run_id: string;
-  script_id: string;
+export interface LogLine {
   stream: "stdout" | "stderr";
   line: string;
+}
+
+export interface LogBatchEvent {
+  run_id: string;
+  script_id: string;
+  lines: LogLine[];
 }

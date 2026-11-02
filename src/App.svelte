@@ -26,6 +26,7 @@
 
   let editScript: Script | null = $state(null);
   let editArgsText = $state("");
+  let editInterpreterPath = $state("");
   let dragId: string | null = $state(null);
 
   const scriptExtensions = ["py", "js", "mjs", "cjs", "sh", "bash", "pl", "php", "R", "r", "lua", "bat", "cmd", "ps1", "vbs", "vbe", "wsf", "ahk", "au3"];
@@ -45,7 +46,7 @@
   }
 
   function isBusy(script: Script): boolean {
-    return script.status === "running" || script.status === "starting" || script.status === "stopping";
+    return script.status === "starting" || script.status === "stopping";
   }
 
   function statusLabel(status: string): string {
@@ -179,6 +180,7 @@
   function openEdit(script: Script) {
     editScript = { ...script, args: [...script.args] };
     editArgsText = script.args.join("\n");
+    editInterpreterPath = script.interpreter_path ?? "";
   }
 
   async function saveEdit() {
@@ -189,6 +191,8 @@
         editScript.name,
         editArgsText.split("\n").map((arg) => arg.trim()).filter((arg) => arg.length > 0),
         editScript.cwd || null,
+        editInterpreterPath.trim() || null,
+        editScript.stop_timeout_sec || 3,
         editScript.enabled,
       );
       editScript = null;
@@ -355,8 +359,8 @@
             {/if}
           </div>
         {:else}
-          <div class="script-list">
-            <div class="list-head">
+          <div class="script-list" role="list">
+            <div class="list-head" role="presentation">
               <span class="col-drag"></span>
               <span>脚本</span>
               <span>运行时</span>
@@ -366,6 +370,7 @@
             {#each filteredScripts as script, index (script.id)}
               <div
                 class="script-row"
+                role="listitem"
                 class:dragging={dragId === script.id}
                 draggable="true"
                 ondragstart={(event) => onDragStart(event, script.id)}
@@ -417,7 +422,7 @@
                 <div class="runtime-head">
                   <span class="status-dot" class:running={runtime.installed}></span>
                   <strong>{runtime.name}</strong>
-                  <span class="badge">{runtime.installed ? "已就绪" : "未找到"}</span>
+                  <span class="badge">{runtime.status === "multiple" ? `${runtime.candidates.length} 个安装` : runtime.installed ? "已就绪" : "未找到"}</span>
                 </div>
                 <div class="runtime-version">{runtime.version ? `v${runtime.version}` : runtime.installed ? "版本未知" : "—"}</div>
                 <div class="runtime-path mono" title={runtime.exe_path ?? ""}>{runtime.exe_path ?? "未检测到可执行文件"}</div>
@@ -484,6 +489,8 @@
         <div class="field"><div class="label">路径</div><div class="path-value mono">{editScript.path}</div></div>
         <div class="field"><label class="label" for="edit-args">参数（每行一个）</label><textarea id="edit-args" class="textarea small" bind:value={editArgsText}></textarea></div>
         <div class="field"><label class="label" for="edit-cwd">工作目录（可选）</label><input id="edit-cwd" class="input mono" bind:value={editScript.cwd} /></div>
+        <div class="field"><label class="label" for="edit-interpreter">解释器路径（可选）</label><input id="edit-interpreter" class="input mono" placeholder="留空则使用自动检测结果" bind:value={editInterpreterPath} /></div>
+        <div class="field"><label class="label" for="edit-stop-timeout">停止超时（秒）</label><input id="edit-stop-timeout" class="input" type="number" min="1" max="60" bind:value={editScript.stop_timeout_sec} /></div>
         <label class="check-row"><input type="checkbox" bind:checked={editScript.enabled} /> 启用此脚本（显示在快捷面板中）</label>
       </div>
       <div class="modal-foot"><button class="btn" onclick={() => editScript = null}>取消</button><button class="btn btn-primary" onclick={saveEdit}>保存</button></div>

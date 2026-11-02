@@ -3,14 +3,14 @@ use crate::runner::RunHandle;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 
 pub struct AppState {
     pub db: Mutex<Connection>,
     pub runs: Mutex<HashMap<String, RunHandle>>,
     pub data_dir: PathBuf,
-    pub runtime_cache: Mutex<Option<Vec<RuntimeInfo>>>,
+    pub runtime_cache: Mutex<Option<(std::time::Instant, Vec<RuntimeInfo>)>>,
     pub exiting: AtomicBool,
 }
 

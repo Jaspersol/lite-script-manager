@@ -11,6 +11,10 @@ pub struct Script {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub interpreter_path: Option<String>,
+    #[serde(default = "default_stop_timeout")]
+    pub stop_timeout_sec: i64,
     pub sort_order: i64,
     pub enabled: bool,
     pub created_at: i64,
@@ -23,6 +27,10 @@ pub struct Script {
 
 fn default_status() -> String {
     "stopped".to_string()
+}
+
+fn default_stop_timeout() -> i64 {
+    3
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -62,9 +70,14 @@ pub struct RunStateEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct LogEvent {
-    pub run_id: String,
-    pub script_id: String,
+pub struct LogLine {
     pub stream: String,
     pub line: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogBatchEvent {
+    pub run_id: String,
+    pub script_id: String,
+    pub lines: Vec<LogLine>,
 }
