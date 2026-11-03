@@ -226,6 +226,14 @@
     editProcessMatch = script.process_match ?? "";
   }
 
+  async function editScriptFile(script: Script) {
+    try {
+      await api.openScriptInEditor(script.id);
+    } catch (error) {
+      showToast(friendlyError(error), "error");
+    }
+  }
+
   async function saveEdit() {
     if (!editScript) return;
     try {
@@ -506,7 +514,8 @@
                   <button class="btn btn-sm run-btn" class:stop={script.status === "running"} disabled={!script.enabled || script.status === "starting" || script.status === "stopping" || script.status === "queued"} onclick={() => toggleScript(script)}>
                     {#if script.status === "running"}<Icon name="stop" size={12} /> 停止{:else if script.status === "starting"}启动中…{:else if script.status === "stopping"}停止中…{:else if script.status === "queued"}排队中…{:else}<Icon name="play" size={12} /> 启动{/if}
                   </button>
-                  <button class="icon-btn btn btn-ghost" title="编辑" aria-label="编辑脚本" onclick={() => openEdit(script)}><Icon name="edit" size={15} /></button>
+                  <button class="icon-btn btn btn-ghost" title="设置" aria-label="脚本设置" onclick={() => openEdit(script)}><Icon name="sliders" size={15} /></button>
+                  <button class="icon-btn btn btn-ghost" title="编辑" aria-label="用记事本编辑脚本" onclick={() => editScriptFile(script)}><Icon name="edit" size={15} /></button>
                   <button class="icon-btn btn btn-ghost" title="移除" aria-label="移除脚本" onclick={() => deleteScript(script)}><Icon name="trash" size={15} /></button>
                 </div>
               </div>
@@ -609,8 +618,8 @@
 
 {#if editScript}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) editScript = null; }}>
-    <div class="modal" role="dialog" aria-modal="true" aria-label="编辑脚本">
-      <div class="modal-head"><div class="modal-title">编辑脚本</div><button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => editScript = null}><Icon name="close" size={17} /></button></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-label="脚本设置">
+      <div class="modal-head"><div class="modal-title">脚本设置</div><button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => editScript = null}><Icon name="close" size={17} /></button></div>
       <div class="modal-body">
         <div class="field"><label class="label" for="edit-name">名称</label><input id="edit-name" class="input" bind:value={editScript.name} /></div>
         <div class="field"><div class="label">路径</div><div class="path-value mono">{editScript.path}</div></div>
@@ -687,127 +696,146 @@
     height: 100vh; padding: 12px; background: var(--bg);
   }
   .sidebar {
-    display: flex; flex-direction: column; padding: 20px 13px 14px;
-    background: #f8f8fa; border-radius: 18px; min-width: 0;
+    display: flex; flex-direction: column; padding: 18px 12px 13px;
+    background: #f7f8fa; border-radius: 18px; min-width: 0;
   }
-  .brand { display: flex; gap: 10px; align-items: center; padding: 4px 8px 28px; }
+  .brand { display: flex; gap: 10px; align-items: center; padding: 4px 8px 26px; }
   .brand-mark {
-    width: 31px; height: 31px; border-radius: 9px; display: grid; place-items: center;
-    background: #e8eefb; color: #4a6bb8; font-weight: 700; font-size: 10px; letter-spacing: -.2px;
+    width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
+    background: #e8eefb; color: #4a6bb8; font-weight: 700; font-size: 10.5px; letter-spacing: -.2px;
   }
-  .brand-name { font-size: 13px; font-weight: 600; letter-spacing: -.1px; color: #343941; }
-  .brand-sub { color: #a4aab4; font-size: 9.5px; margin-top: 3px; letter-spacing: .1px; }
-  .nav { display: grid; gap: 3px; }
+  .brand-name { font-size: 13px; font-weight: 600; letter-spacing: -.1px; color: #2f343c; }
+  .brand-sub { color: #959ca7; font-size: 10.5px; margin-top: 3px; letter-spacing: .1px; }
+  .nav { display: grid; gap: 2px; }
   .nav button {
-    display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px;
-    border: 0; border-radius: 11px; background: transparent; color: #707784;
-    font-size: 13px; text-align: left; transition: background .15s, color .15s;
+    display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 11px;
+    border: 0; border-radius: 10px; background: transparent; color: #676e7a;
+    font-size: 13px; text-align: left;
+    transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
   }
-  .nav button:hover { background: #f0f1f5; color: #414852; }
+  .nav button:hover { background: #f0f1f5; color: #3c434d; }
   .nav button.active { background: #e9effb; color: #37578f; font-weight: 550; }
-  .nav-icon { width: 18px; display: grid; place-items: center; color: #9aa1ac; flex: 0 0 auto; }
+  .nav-icon { width: 18px; display: grid; place-items: center; color: #979ea9; flex: 0 0 auto; transition: color var(--dur-1) var(--ease); }
+  .nav button:hover .nav-icon { color: #6c7480; }
   .nav button.active .nav-icon { color: #5a79c4; }
-  .nav-count { margin-left: auto; font-size: 10px; color: #a1a7b1; padding: 1px 2px; }
+  .nav-count { margin-left: auto; font-size: 10.5px; color: #939aa5; padding: 1px 2px; }
   .nav button.active .nav-count { color: #6d84b8; }
   .sidebar-bottom { margin-top: auto; }
   .mini-card {
-    border: 1px solid #eef0f4; background: rgba(255, 255, 255, .78);
-    border-radius: 14px; padding: 14px; box-shadow: 0 1px 2px rgba(35, 44, 62, .025);
+    border: 1px solid var(--line-soft); background: rgba(255, 255, 255, .8);
+    border-radius: 14px; padding: 13px 14px; box-shadow: 0 1px 2px rgba(35, 44, 62, .025);
   }
-  .mini-card-top { display: flex; gap: 8px; align-items: center; color: #858c97; font-size: 10.5px; }
-  .mini-card-value { font-size: 12px; margin-top: 10px; color: #444a53; font-weight: 550; }
-  .mini-card-hint { font-size: 9.5px; color: #a7adb7; margin-top: 4px; line-height: 1.45; }
-  .version { color: #b3b8c1; font-size: 9.5px; padding: 14px 4px 2px; }
+  .mini-card-top { display: flex; gap: 8px; align-items: center; color: #767d89; font-size: 11px; }
+  .mini-card-value { font-size: 12.5px; margin-top: 9px; color: #3d434c; font-weight: 550; }
+  .mini-card-hint { font-size: 10.5px; color: #959ca7; margin-top: 4px; line-height: 1.5; }
+  .version { color: #a4aab4; font-size: 10.5px; padding: 13px 4px 2px; }
   .workspace {
     min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
-    background: #fff; border: 1px solid #eef0f4; border-radius: 18px;
+    background: #fff; border: 1px solid var(--line); border-radius: 18px;
+    box-shadow: 0 1px 2px rgba(35, 44, 62, .025);
   }
   .topbar {
     flex: 0 0 auto;
     display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
-    padding: 30px 34px 18px;
+    padding: 26px 32px 16px;
   }
-  .topbar h1 { margin: 0; font-size: 20px; letter-spacing: -.3px; font-weight: 600; color: #30353d; }
-  .topbar p { margin: 7px 0 0; color: #969da8; font-size: 11.5px; line-height: 1.5; }
-  .topbar-actions { display: flex; gap: 7px; padding-top: 2px; }
-  .content { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 8px 34px 34px; }
-  .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 15px; }
+  .topbar h1 { margin: 0; font-size: 20px; letter-spacing: -.25px; font-weight: 600; color: #2b3037; }
+  .topbar p { margin: 6px 0 0; color: #858c98; font-size: 12.5px; line-height: 1.5; }
+  .topbar-actions { display: flex; gap: 8px; padding-top: 2px; }
+  .content {
+    flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain;
+    padding: 4px 32px 32px; animation: page-in var(--dur-2) var(--ease) both;
+  }
+  @keyframes page-in {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: none; }
+  }
+  .toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
   .search-wrap { position: relative; width: min(360px, 100%); }
   .search-icon {
     position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
-    color: #a8aeb8; line-height: 1; pointer-events: none; display: flex;
+    color: #9aa1ac; line-height: 1; pointer-events: none; display: flex;
   }
   .search { padding-left: 36px; height: 36px; }
-  .toolbar-meta { margin-left: auto; color: #a8aeb8; font-size: 10.5px; }
-  .script-list { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
+  .toolbar-meta { margin-left: auto; color: #8f96a1; font-size: 11.5px; }
+  .script-list { border: 1px solid var(--line-soft); border-radius: 16px; overflow: hidden; background: #fff; }
   .list-head, .script-row {
-    display: grid; grid-template-columns: 20px minmax(180px, 1fr) 116px 76px 130px;
-    gap: 12px; align-items: center;
+    display: grid; grid-template-columns: 20px minmax(180px, 1fr) 116px 76px 176px;
+    gap: 14px; align-items: center;
   }
   .list-head {
-    padding: 12px 16px; color: #979eaa; font-size: 9.5px; text-transform: uppercase;
-    letter-spacing: .08em; background: #fbfbfc; border-bottom: 1px solid #f1f2f5;
+    padding: 11px 16px; color: #8b929d; font-size: 11px; font-weight: 500;
+    letter-spacing: .01em; background: #fafbfc; border-bottom: 1px solid var(--line-soft);
   }
-  .col-actions { text-align: right; }
-  .script-row { padding: 14px 16px; border-bottom: 1px solid #f3f4f6; transition: background .12s, opacity .12s; }
+  .col-actions { text-align: left; }
+  .script-row {
+    padding: 13px 16px; border-bottom: 1px solid #f3f4f7;
+    transition: background-color var(--dur-1) var(--ease), opacity var(--dur-1) var(--ease);
+  }
   .script-row:last-child { border-bottom: 0; }
-  .script-row:hover { background: #fbfcfe; }
-  .script-row.dragging { opacity: .42; }
-  .drag-handle { color: #c3c8d1; font-size: 14px; cursor: grab; user-select: none; }
+  .script-row:hover { background: #fafbfd; }
+  .script-row.dragging { opacity: .45; }
+  .drag-handle { color: #c6cbd4; font-size: 15px; cursor: grab; user-select: none; transition: color var(--dur-1) var(--ease); }
+  .drag-handle:hover { color: #9aa1ac; }
   .script-main { min-width: 0; }
   .script-name-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
-  .script-name { font-size: 12.8px; font-weight: 550; color: #383e47; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .script-path { color: #a3a9b3; font-size: 10px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .script-name { font-size: 13px; font-weight: 550; color: #333941; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .script-path { color: #969da8; font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .error-dot { width: 5px; height: 5px; background: var(--danger); border-radius: 50%; flex: 0 0 auto; }
-  .runtime-badge { color: #7b8494; background: #f4f6fa; }
-  .status-cell { display: flex; align-items: center; gap: 7px; color: #7f8793; font-size: 10.5px; white-space: nowrap; }
-  .row-actions { display: flex; justify-content: flex-end; gap: 3px; }
-  .run-btn { min-width: 64px; background: #eef4fc; color: #4c6da9; }
-  .run-btn:hover { background: #e3edfb; color: #3d5f9f; }
+  .runtime-badge { color: #6f7683; background: #f3f5f9; }
+  .status-cell { display: flex; align-items: center; gap: 7px; color: #737b87; font-size: 11.5px; white-space: nowrap; }
+  .row-actions { display: flex; justify-content: flex-end; gap: 2px; }
+  .run-btn { min-width: 64px; background: #edf3fc; color: #4c6da9; }
+  .run-btn:hover { background: #e2ecfb; color: #3d5f9f; }
   .run-btn.stop { color: #b46060; background: #fbf0f0; }
   .run-btn.stop:hover { background: #f9e7e7; }
   .empty-state { min-height: 300px; }
   .empty-actions { display: flex; gap: 8px; }
   .runtime-summary {
-    display: flex; align-items: baseline; gap: 28px; padding: 16px 18px;
-    border: 1px solid #eef0f4; border-radius: 16px; background: #fbfbfc; margin-bottom: 14px;
+    display: flex; align-items: baseline; gap: 28px; padding: 15px 18px;
+    border: 1px solid var(--line-soft); border-radius: 16px; background: #fafbfc; margin-bottom: 14px;
   }
-  .runtime-summary strong { font-size: 20px; color: #39404a; margin-right: 3px; font-weight: 550; }
-  .runtime-summary span { color: #8b929d; font-size: 10.5px; }
-  .runtime-summary .tiny { margin-left: auto; color: #a8aeb8; }
-  .runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 10px; }
-  .runtime-card { padding: 16px; border: 1px solid #eef0f4; border-radius: 16px; background: #fff; min-width: 0; transition: border-color .15s, background .15s; }
-  .runtime-card:hover { border-color: #e4e8f0; background: #fdfdff; }
-  .runtime-card.missing { opacity: .66; }
+  .runtime-summary strong { font-size: 21px; color: #333941; margin-right: 3px; font-weight: 550; letter-spacing: -.3px; }
+  .runtime-summary span { color: #7f8793; font-size: 11.5px; }
+  .runtime-summary .tiny { margin-left: auto; color: #8f96a1; }
+  .runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
+  .runtime-card {
+    padding: 16px; border: 1px solid var(--line-soft); border-radius: 16px; background: #fff; min-width: 0;
+    transition: border-color var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
+  }
+  .runtime-card:hover { border-color: #e1e6ef; background: #fdfdff; box-shadow: var(--shadow-soft); }
+  .runtime-card.missing { opacity: .68; }
   .runtime-head { display: flex; align-items: center; gap: 8px; }
-  .runtime-head strong { font-size: 12.5px; font-weight: 550; color: #3d434c; }
+  .runtime-head strong { font-size: 13px; font-weight: 550; color: #363c45; }
   .runtime-head .badge { margin-left: auto; }
-  .runtime-version { color: #5c7cc1; font-size: 10.5px; margin: 12px 0 5px; }
-  .runtime-path { color: #a1a7b2; font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .runtime-error { color: #b36666; font-size: 10px; margin-top: 7px; line-height: 1.45; }
-  .path-picker { display: flex; gap: 10px; align-items: center; margin: 18px 0 10px; }
+  .runtime-version { color: #5c7cc1; font-size: 11.5px; margin: 12px 0 5px; }
+  .runtime-path { color: #8f96a1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .runtime-error { color: #b36666; font-size: 11px; margin-top: 7px; line-height: 1.5; }
+  .path-picker { display: flex; gap: 10px; align-items: center; margin: 0 0 12px; }
   .path-value {
-    flex: 1; min-width: 0; border: 1px solid #f0f1f4; background: #f7f8fa; color: #8b929e;
-    border-radius: 10px; padding: 9px 11px; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    flex: 1; min-width: 0; border: 1px solid var(--line-soft); background: #f6f7f9; color: #6f7683;
+    border-radius: 10px; padding: 9px 11px; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .small { min-height: 74px; font-size: 11.5px; }
-  .editor { font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
-  .form-grid { gap: 11px; }
+  .small { min-height: 74px; font-size: 12px; }
+  .modal-body .segmented { margin-bottom: 16px; }
+  .editor { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; line-height: 1.6; }
+  .form-grid { gap: 12px; }
   .hash-row {
     display: flex; align-items: center; gap: 10px; justify-content: space-between;
-    border: 1px solid #f0f1f4; background: #f7f8fa; border-radius: 10px; padding: 8px 11px;
+    border: 1px solid var(--line-soft); background: #f6f7f9; border-radius: 10px; padding: 7px 11px;
   }
-  .hash-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aa1ac; }
-  .runtime-details { margin-top: 10px; border-top: 1px solid #f2f3f6; padding-top: 9px; color: #9aa1ac; font-size: 9.5px; line-height: 1.55; }
-  .runtime-candidates { margin-top: 8px; font-size: 9.5px; color: #9aa1ac; }
-  .runtime-candidates summary { cursor: pointer; color: #aeb4be; }
+  .hash-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #858c98; }
+  .runtime-details { margin-top: 10px; border-top: 1px solid #f2f3f6; padding-top: 9px; color: #8f96a1; font-size: 10.5px; line-height: 1.6; }
+  .runtime-candidates { margin-top: 8px; font-size: 10.5px; color: #8f96a1; }
+  .runtime-candidates summary { cursor: pointer; color: #8f96a1; transition: color var(--dur-1) var(--ease); }
+  .runtime-candidates summary:hover { color: #5f6672; }
   .candidate-row { display: flex; align-items: center; gap: 5px; margin-top: 6px; min-width: 0; }
   .candidate-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .first-run-lead { color: #525964; font-size: 12px; line-height: 1.7; margin: 0 0 17px; }
+  .first-run-lead { color: #4b525d; font-size: 12.5px; line-height: 1.7; margin: 0 0 16px; }
   .first-run-list { display: grid; gap: 9px; margin-bottom: 15px; }
-  .first-run-list div { border: 1px solid #f0f2f5; background: #fbfbfc; border-radius: 12px; padding: 12px 13px; }
-  .first-run-list strong { display: block; font-size: 11.5px; margin-bottom: 3px; color: #414852; }
-  .first-run-list span { color: #9299a4; font-size: 10.5px; line-height: 1.5; }
+  .first-run-list div { border: 1px solid var(--line-soft); background: #fbfbfc; border-radius: 12px; padding: 12px 13px; }
+  .first-run-list strong { display: block; font-size: 12.5px; margin-bottom: 3px; color: #3c434d; }
+  .first-run-list span { color: #858c98; font-size: 11.5px; line-height: 1.55; }
   @media (max-width: 980px) {
     .shell { grid-template-columns: 72px minmax(0, 1fr); }
     .brand { justify-content: center; padding-left: 0; padding-right: 0; }
@@ -815,11 +843,11 @@
     .nav button { justify-content: center; padding: 0; font-size: 0; }
     .nav-icon { width: auto; }
     .sidebar-bottom { display: none; }
-    .topbar { padding: 24px 24px 16px; }
-    .content { padding: 6px 24px 26px; }
+    .topbar { padding: 22px 24px 15px; }
+    .content { padding: 4px 24px 26px; }
   }
   @media (max-width: 900px) {
-    .list-head, .script-row { grid-template-columns: 20px minmax(150px, 1fr) 90px 130px; }
+    .list-head, .script-row { grid-template-columns: 20px minmax(150px, 1fr) 90px 176px; gap: 12px; }
     .list-head span:nth-child(3), .script-row > div:nth-child(3) { display: none; }
   }
 </style>

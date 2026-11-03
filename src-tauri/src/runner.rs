@@ -13,7 +13,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
@@ -945,7 +945,7 @@ fn flush_log_batch(app: &AppHandle, run_id: &str, script_id: &str, batch: &mut V
 async fn pump_output<R>(
     reader: R,
     stream: &'static str,
-    log: Arc<AsyncMutex<tokio::fs::File>>,
+    log: Arc<AsyncMutex<BufWriter<tokio::fs::File>>>,
     app: AppHandle,
     run_id: String,
     script_id: String,
@@ -963,6 +963,7 @@ async fn pump_output<R>(
         let mut bytes = Vec::new();
         tokio::select! {
             _ = ticker.tick() => {
+                let _ = log.lock().await.flush().await;
                 if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
                     flush_log_batch(&app, &run_id, &script_id, &mut batch);
                 } else {
@@ -989,12 +990,14 @@ async fn pump_output<R>(
                                 log_bytes.fetch_add(formatted.len() as u64, Ordering::Relaxed);
                             }
                         }
-                        ring.push(LogLine { stream: stream.to_string(), line: line.clone() });
                         if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                            ring.push(LogLine { stream: stream.to_string(), line: line.clone() });
                             batch.push(LogLine { stream: stream.to_string(), line });
                             if batch.len() >= 64 {
                                 flush_log_batch(&app, &run_id, &script_id, &mut batch);
                             }
+                        } else {
+                            ring.push(LogLine { stream: stream.to_string(), line });
                         }
                     }
                     Err(_) => {
@@ -1007,6 +1010,7 @@ async fn pump_output<R>(
             }
         }
     }
+    let _ = log.lock().await.flush().await;
 }
 
 fn finish_run(
@@ -1027,20 +1031,22 @@ fn finish_run(
         .max(final_metrics.cpu_time_ms);
     let reason = run.stop_reason.lock().ok().and_then(|value| value.clone());
     let state = app.state::<AppState>();
-    if let Ok(conn) = state.db.lock() {
-        let _ = db::finish_run(
-            &conn,
-            &run.run_id,
-            status,
-            exit_code,
-            error.as_deref(),
-            reason.as_deref(),
-            Some(peak as i64),
-            Some(cpu as i64),
-            Some(run.log_bytes.load(Ordering::Relaxed) as i64),
-        );
-        let _ = logging::prune_logs(&conn, &state.data_dir);
+    {
+        if let Ok(conn) = state.db.lock() {
+            let _ = db::finish_run(
+                &conn,
+                &run.run_id,
+                status,
+                exit_code,
+                error.as_deref(),
+                reason.as_deref(),
+                Some(peak as i64),
+                Some(cpu as i64),
+                Some(run.log_bytes.load(Ordering::Relaxed) as i64),
+            );
+        }
     }
+    logging::auto_prune_logs(&state.db, &state.data_dir);
     if let Ok(mut runs) = state.runs.lock() {
         runs.remove(&run.run_id);
     }
@@ -1410,7 +1416,10 @@ pub fn start_with(
         source_id: options.source_id.clone(),
     });
 
-    let log = Arc::new(AsyncMutex::new(log_file));
+    let log = Arc::new(AsyncMutex::new(BufWriter::with_capacity(
+        64 * 1024,
+        log_file,
+    )));
     if let Some(stdout) = child.stdout.take() {
         let app = app.clone();
         let log = log.clone();

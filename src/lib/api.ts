@@ -40,6 +40,7 @@ export const api = {
   getRunLog: (runId: string, maxLines = 400) =>
     invoke<string[]>("get_run_log", { runId, maxLines }),
   openLogFile: (runId: string) => invoke<void>("open_log_file", { runId }),
+  openScriptInEditor: (id: string) => invoke<void>("open_script_in_editor", { id }),
   listRuns: (filters: { scriptId?: string | null; status?: string | null; source?: string | null; limit?: number } = {}) =>
     invoke<RunRecord[]>("list_runs", {
       scriptId: filters.scriptId ?? null,

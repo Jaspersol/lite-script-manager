@@ -1,11 +1,20 @@
 use crate::runner;
 use crate::settings;
 use crate::state::AppState;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
     AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
+
+/// Set when the panel is dismissed by losing focus. A tray click that lands
+/// within this window is the same click that dismissed the panel, so it must
+/// not reopen it.
+static PANEL_BLUR_AT: Mutex<Option<Instant>> = Mutex::new(None);
+const PANEL_REOPEN_GUARD: Duration = Duration::from_millis(300);
+const BLUR_DEBOUNCE: Duration = Duration::from_millis(150);
 
 const PANEL_LABEL: &str = "panel";
 const MAIN_LABEL: &str = "main";
@@ -44,6 +53,27 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
+}
+
+fn attach_dismiss_on_blur(window: &WebviewWindow) {
+    let window_for_event = window.clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::Focused(false) = event {
+            let window = window_for_event.clone();
+            // Focus flickers while the window is being shown; only dismiss once
+            // it is still unfocused after the debounce.
+            std::thread::spawn(move || {
+                std::thread::sleep(BLUR_DEBOUNCE);
+                if window.is_focused().unwrap_or(false) || !window.is_visible().unwrap_or(false) {
+                    return;
+                }
+                if let Ok(mut at) = PANEL_BLUR_AT.lock() {
+                    *at = Some(Instant::now());
+                }
+                let _ = window.destroy();
+            });
+        }
+    });
 }
 
 fn attach_close_behavior(window: &WebviewWindow) {
@@ -92,7 +122,8 @@ pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .build()?;
 
     attach_close_behavior(&window);
-    let position = panel_position(app);
+    attach_dismiss_on_blur(&window);
+    let position = panel_position(app, &window);
     let _ = window.set_position(position);
     let _ = window.show();
     let _ = window.set_focus();
@@ -163,6 +194,17 @@ fn apply_light_caption(window: &WebviewWindow) {
 fn apply_light_caption(_window: &WebviewWindow) {}
 
 pub fn toggle_panel(app: &AppHandle) {
+    let recently_dismissed = PANEL_BLUR_AT
+        .lock()
+        .ok()
+        .and_then(|at| *at)
+        .is_some_and(|at| at.elapsed() < PANEL_REOPEN_GUARD);
+    if recently_dismissed {
+        if let Ok(mut at) = PANEL_BLUR_AT.lock() {
+            *at = None;
+        }
+        return;
+    }
     if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
         if panel.is_visible().unwrap_or(false) {
             let _ = panel.destroy();
@@ -217,14 +259,19 @@ pub fn exit_app(app: &AppHandle) {
     app.exit(0);
 }
 
-fn panel_position(app: &AppHandle) -> PhysicalPosition<i32> {
+fn panel_position(app: &AppHandle, window: &WebviewWindow) -> PhysicalPosition<i32> {
     let Some(monitor) = app.primary_monitor().ok().flatten() else {
         return PhysicalPosition::new(100, 100);
     };
     let scale = monitor.scale_factor();
     let work = monitor.work_area();
-    let width = (PANEL_WIDTH * scale) as i32;
-    let height = (PANEL_HEIGHT * scale) as i32;
+    // Outer size matters: an undecorated Windows window still carries invisible
+    // DWM frame margins, so sizing off the logical panel width would leave the
+    // card flush against the screen edge.
+    let (width, height) = window
+        .outer_size()
+        .map(|size| (size.width as i32, size.height as i32))
+        .unwrap_or(((PANEL_WIDTH * scale) as i32, (PANEL_HEIGHT * scale) as i32));
     let margin = (10.0 * scale) as i32;
     let x = work.position.x + work.size.width as i32 - width - margin;
     let y = work.position.y + work.size.height as i32 - height - margin;

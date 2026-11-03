@@ -143,11 +143,11 @@
 
 <style>
   .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
-  .settings-card { border: 1px solid #eef0f4; background: #fff; border-radius: 16px; padding: 19px; }
-  .settings-card h3 { margin: 0 0 16px; font-size: 12px; color: #454c57; letter-spacing: .01em; font-weight: 550; }
-  .setting-check { display: flex; align-items: flex-start; gap: 9px; color: #767e8a; font-size: 12px; line-height: 1.5; margin-bottom: 13px; }
+  .settings-card { border: 1px solid var(--line-soft); background: #fff; border-radius: 16px; padding: 19px; }
+  .settings-card h3 { margin: 0 0 16px; font-size: 12.5px; color: #3c434d; letter-spacing: .01em; font-weight: 550; }
+  .setting-check { display: flex; align-items: flex-start; gap: 9px; color: #626a76; font-size: 12.5px; line-height: 1.5; margin-bottom: 13px; }
   .setting-check input { accent-color: var(--accent); margin-top: 2px; }
-  .info-box { border: 1px solid #eef0f4; background: #f8f9fb; border-radius: 11px; padding: 11px 12px; color: #8b929e; font-size: 10.5px; line-height: 1.6; }
+  .info-box { border: 1px solid var(--line-soft); background: #f8f9fb; border-radius: 11px; padding: 11px 12px; color: #7f8793; font-size: 11px; line-height: 1.6; }
   .field { margin-bottom: 13px; }
-  .textarea { min-height: 82px; font-size: 10.5px; }
+  .textarea { min-height: 82px; font-size: 11.5px; }
 </style>

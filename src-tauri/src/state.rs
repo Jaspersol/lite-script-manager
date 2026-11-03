@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::{Notify, broadcast};
 
 pub struct AppState {
@@ -13,6 +13,7 @@ pub struct AppState {
     pub runs: Mutex<HashMap<String, RunHandle>>,
     pub data_dir: PathBuf,
     pub runtime_cache: Mutex<Option<(std::time::Instant, Vec<RuntimeInfo>)>>,
+    pub trigger_generation: AtomicU64,
     pub exiting: AtomicBool,
     pub adopting: AtomicBool,
     pub ui_visible: AtomicBool,
@@ -30,6 +31,7 @@ impl AppState {
             runs: Mutex::new(HashMap::new()),
             data_dir,
             runtime_cache: Mutex::new(None),
+            trigger_generation: AtomicU64::new(0),
             exiting: AtomicBool::new(false),
             adopting: AtomicBool::new(false),
             ui_visible: AtomicBool::new(false),

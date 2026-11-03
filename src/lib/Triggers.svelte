@@ -474,36 +474,36 @@
 {/if}
 
 <style>
-  .trigger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 11px; }
+  .trigger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
   .trigger-card {
-    border: 1px solid #eef0f4; background: #fff; border-radius: 16px; padding: 16px;
-    min-width: 0; transition: border-color .15s, background .15s;
+    border: 1px solid var(--line-soft); background: #fff; border-radius: 16px; padding: 16px;
+    min-width: 0; transition: border-color var(--dur-2) var(--ease), background-color var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease);
   }
-  .trigger-card:hover { border-color: #e3e7ee; background: #fdfdff; }
-  .trigger-card.disabled { opacity: .52; }
+  .trigger-card:hover { border-color: #e1e6ef; background: #fdfdff; box-shadow: var(--shadow-soft); }
+  .trigger-card.disabled { opacity: .55; }
   .trigger-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-  .trigger-name { font-size: 13px; font-weight: 550; color: #3b414a; }
-  .cell-sub { color: #9ba2ad; font-size: 10.5px; margin-top: 4px; }
-  .trigger-rule { color: #7c8799; font-size: 11px; margin: 14px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .trigger-meta { display: flex; gap: 12px; color: #a5abb5; font-size: 10px; }
-  .cell-error { color: #b86666; font-size: 9.5px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .trigger-actions { display: flex; gap: 3px; margin-top: 14px; align-items: center; }
+  .trigger-name { font-size: 13.5px; font-weight: 550; color: #363c45; }
+  .cell-sub { color: #8a919c; font-size: 11px; margin-top: 4px; }
+  .trigger-rule { color: #6f7a8d; font-size: 11.5px; margin: 14px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trigger-meta { display: flex; gap: 12px; color: #8f96a1; font-size: 10.5px; }
+  .cell-error { color: #b86666; font-size: 10.5px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trigger-actions { display: flex; gap: 2px; margin-top: 14px; align-items: center; }
   .trigger-actions .btn:not(.btn-ghost) { background: #eef4fc; color: #4c6da9; }
   .recent-head { margin: 28px 0 11px; }
-  .recent-head h3 { font-size: 12.5px; margin: 0; font-weight: 550; color: #4b525d; }
-  .recent-empty { color: #a3a9b3; font-size: 10.5px; padding: 13px 0; }
-  .table-card { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
+  .recent-head h3 { font-size: 13px; margin: 0; font-weight: 550; color: #40474f; }
+  .recent-empty { color: #8f96a1; font-size: 11px; padding: 13px 0; }
+  .table-card { border: 1px solid var(--line-soft); border-radius: 16px; overflow: hidden; background: #fff; }
   .table-head {
-    padding: 12px 16px; color: #979eaa; font-size: 10px; letter-spacing: .08em;
-    text-transform: uppercase; background: #fbfbfc; border-bottom: 1px solid #f1f2f5;
+    padding: 11px 16px; color: #8b929d; font-size: 11px; font-weight: 500;
+    letter-spacing: .01em; background: #fafbfc; border-bottom: 1px solid var(--line-soft);
   }
-  .table-row { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; font-size: 10.5px; color: #7d8591; }
+  .table-row { padding: 12px 16px; border-bottom: 1px solid #f3f4f7; font-size: 11px; color: #6f7683; }
   .table-row:last-child { border-bottom: 0; }
   .event-grid { display: grid; grid-template-columns: 130px 130px minmax(140px, 1fr) minmax(180px, 1.4fr); gap: 12px; align-items: center; }
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .form-section {
-    color: #979eaa; font-size: 10px; font-weight: 600; letter-spacing: .07em;
-    text-transform: uppercase; border-top: 1px solid #f0f2f5; padding-top: 16px; margin: 6px 0 13px;
+    color: #8b929d; font-size: 11px; font-weight: 600; letter-spacing: .02em;
+    border-top: 1px solid var(--line-soft); padding-top: 16px; margin: 6px 0 13px;
   }
   .actions-head { display: flex; align-items: center; justify-content: space-between; }
   .action-row { display: grid; grid-template-columns: 130px minmax(130px, 1fr) auto; gap: 7px; margin-bottom: 8px; align-items: center; }

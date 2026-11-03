@@ -419,6 +419,37 @@ fn open_log_file(state: State<AppState>, run_id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_script_in_editor(state: State<AppState>, id: String) -> Result<(), String> {
+    let path = {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::get_script(&conn, &id)?.map(|script| script.path)
+    }
+    .ok_or_else(|| "脚本不存在".to_string())?;
+    if !std::path::Path::new(&path).exists() {
+        return Err("脚本文件不存在".to_string());
+    }
+    open_in_editor(&path)
+}
+
+#[cfg(windows)]
+fn open_in_editor(path: &str) -> Result<(), String> {
+    std::process::Command::new("notepad.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开记事本失败: {e}"))
+}
+
+#[cfg(not(windows))]
+fn open_in_editor(path: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开编辑器失败: {e}"))
+}
+
+#[tauri::command]
 fn list_runs(
     state: State<AppState>,
     script_id: Option<String>,
@@ -733,8 +764,8 @@ fn update_settings(
     {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         settings::update(&conn, &values)?;
-        let _ = logging::prune_logs(&conn, &state.data_dir);
     }
+    logging::auto_prune_logs(&state.db, &state.data_dir);
     let autostart_enabled = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         settings::get_bool(&conn, "start_with_windows", false)
@@ -845,6 +876,7 @@ pub fn run() {
             get_active_log,
             get_run_log,
             open_log_file,
+            open_script_in_editor,
             list_runs,
             get_run,
             clear_runs,

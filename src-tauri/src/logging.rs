@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 static APP_LOG: OnceLock<PathBuf> = OnceLock::new();
 
@@ -136,9 +136,45 @@ pub fn path_allowed(path: &Path, allowed_roots: &str) -> bool {
     })
 }
 
+static LAST_AUTO_PRUNE: Mutex<Option<Instant>> = Mutex::new(None);
+const AUTO_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
+
 pub fn prune_logs(conn: &Connection, data_dir: &Path) -> Result<(), String> {
     let retention_days = settings::get_i64(conn, "log_retention_days", 14).max(0);
     let max_bytes = settings::get_i64(conn, "log_max_total_mb", 200).max(0) as u64 * 1024 * 1024;
+    prune_log_files(data_dir, retention_days, max_bytes)
+}
+
+/// Runs at most once per [`AUTO_PRUNE_INTERVAL`]. Reads the limits under a
+/// short-lived lock and walks the log directory with the database unlocked.
+pub fn auto_prune_logs(db: &Mutex<Connection>, data_dir: &Path) {
+    let due = LAST_AUTO_PRUNE
+        .lock()
+        .map(|mut last| {
+            if last.is_some_and(|at| at.elapsed() < AUTO_PRUNE_INTERVAL) {
+                false
+            } else {
+                *last = Some(Instant::now());
+                true
+            }
+        })
+        .unwrap_or(false);
+    if !due {
+        return;
+    }
+    let limits = db.lock().ok().map(|conn| {
+        (
+            settings::get_i64(&conn, "log_retention_days", 14).max(0),
+            settings::get_i64(&conn, "log_max_total_mb", 200).max(0) as u64 * 1024 * 1024,
+        )
+    });
+    let Some((retention_days, max_bytes)) = limits else {
+        return;
+    };
+    let _ = prune_log_files(data_dir, retention_days, max_bytes);
+}
+
+fn prune_log_files(data_dir: &Path, retention_days: i64, max_bytes: u64) -> Result<(), String> {
     let root = data_dir.join("logs");
     if !root.exists() {
         return Ok(());

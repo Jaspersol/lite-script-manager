@@ -7,6 +7,7 @@ use crate::settings;
 use crate::state::AppState;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_notification::NotificationExt;
@@ -87,7 +88,9 @@ struct CpuHistory {
 }
 
 pub fn wake(app: &AppHandle) {
-    app.state::<AppState>().trigger_wake.notify_waiters();
+    let state = app.state::<AppState>();
+    state.trigger_generation.fetch_add(1, Ordering::Relaxed);
+    state.trigger_wake.notify_waiters();
 }
 
 fn parse_config(trigger: &Trigger) -> TriggerConfig {
@@ -167,16 +170,12 @@ fn condition_exit(metric: f64, condition: &Condition) -> bool {
     }
 }
 
-fn process_pids(
-    config: &TriggerConfig,
-    snapshot: &HashMap<u32, ProcessMeta>,
-    parent_names: &HashMap<u32, String>,
-) -> Vec<u32> {
+fn process_pids(config: &TriggerConfig, snapshot: &HashMap<u32, ProcessMeta>) -> Vec<u32> {
     let mut values = Vec::new();
     for (pid, meta) in snapshot {
-        let parent = parent_names
+        let parent = snapshot
             .get(&meta.parent)
-            .map(String::as_str)
+            .map(|value| value.name.as_str())
             .unwrap_or("");
         if process_matches(config, meta, parent) {
             values.push(*pid);
@@ -190,7 +189,6 @@ fn resource_value(
     config: &TriggerConfig,
     system: &SystemMetrics,
     snapshot: &HashMap<u32, ProcessMeta>,
-    parent_names: &HashMap<u32, String>,
     cpu_history: &mut CpuHistory,
 ) -> Option<f64> {
     match condition.metric.as_str() {
@@ -199,7 +197,7 @@ fn resource_value(
         "system.process_count" | "process.count" => Some(system.process_count as f64),
         "disk.free_gb" => Some(system.disk_free_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
         "process.memory" | "process.memory_mb" => {
-            let pids = process_pids(config, snapshot, parent_names);
+            let pids = process_pids(config, snapshot);
             let value = metrics::process_metrics(&pids).memory_bytes;
             Some(if condition.metric.ends_with("_mb") {
                 value as f64 / 1024.0 / 1024.0
@@ -208,7 +206,7 @@ fn resource_value(
             })
         }
         "process.cpu" => {
-            let pids = process_pids(config, snapshot, parent_names);
+            let pids = process_pids(config, snapshot);
             let sample = metrics::process_metrics(&pids);
             let now = db::now_ms();
             let elapsed = now.saturating_sub(cpu_history.last_at).max(1) as f64;
@@ -304,7 +302,12 @@ fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<Strin
                 let state = app.state::<AppState>();
                 match state.db.lock() {
                     Ok(conn) => {
-                        db::set_trigger_enabled(&conn, &action.trigger_id, enabled).map(|_| {
+                        let result = db::set_trigger_enabled(&conn, &action.trigger_id, enabled);
+                        drop(conn);
+                        if result.is_ok() {
+                            wake(app);
+                        }
+                        result.map(|_| {
                             format!("trigger {}", if enabled { "enabled" } else { "disabled" })
                         })
                     }
@@ -402,7 +405,6 @@ fn fire_process_matches(
     event_type: &str,
     current: &HashMap<u32, ProcessMeta>,
     previous: &HashMap<u32, ProcessMeta>,
-    parent_names: &HashMap<u32, String>,
 ) {
     let ids = if event_type == "process_started" {
         current
@@ -426,7 +428,10 @@ fn fire_process_matches(
             continue;
         };
         let mut meta = meta.clone();
-        let parent = parent_names.get(&meta.parent).cloned().unwrap_or_default();
+        let parent = current
+            .get(&meta.parent)
+            .map(|value| value.name.as_str())
+            .unwrap_or("");
         for trigger in triggers {
             if trigger.event_type != event_type {
                 continue;
@@ -437,7 +442,7 @@ fn fire_process_matches(
             {
                 enrich(&mut meta);
             }
-            if process_matches(&config, &meta, &parent) {
+            if process_matches(&config, &meta, parent) {
                 if let Err(error) =
                     fire_trigger(app, trigger, &format!("{event_type}:{}:{}", meta.name, pid))
                 {
@@ -465,18 +470,52 @@ fn fire_script_event(app: &AppHandle, triggers: &[Trigger], event: &LifecycleEve
     }
 }
 
+fn needs_process_snapshot(triggers: &[Trigger]) -> bool {
+    triggers
+        .iter()
+        .any(|trigger| match trigger.event_type.as_str() {
+            "process_started" | "process_exited" => true,
+            "resource_enter" | "resource_exit" => {
+                let config = parse_config(trigger);
+                effective_conditions(&config).iter().any(|condition| {
+                    matches!(
+                        condition.metric.as_str(),
+                        "process.memory" | "process.memory_mb" | "process.cpu"
+                    )
+                })
+            }
+            _ => false,
+        })
+}
+
 fn monitor_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        let state = app.state::<AppState>();
         let mut previous: Option<HashMap<u32, ProcessMeta>> = None;
         let mut conditions: HashMap<String, ConditionState> = HashMap::new();
         let mut cpu: HashMap<String, CpuHistory> = HashMap::new();
         let mut sampler = CpuSampler::default();
-        let state = app.state::<AppState>();
         let mut lifecycle = state.lifecycle_tx.subscribe();
+        let mut triggers: Vec<Trigger> = Vec::new();
+        let mut loaded_generation = u64::MAX;
+        let mut interval_ms: u64 = 1000;
+
         loop {
-            let triggers = load_triggers(&app);
+            let generation = state.trigger_generation.load(Ordering::Relaxed);
+            if generation != loaded_generation {
+                loaded_generation = generation;
+                triggers = load_triggers(&app);
+                interval_ms = {
+                    let conn = state.db.lock().ok();
+                    conn.map(|conn| settings::get_i64(&conn, "monitor_interval_ms", 1000))
+                        .unwrap_or(1000)
+                        .clamp(250, 60_000) as u64
+                };
+                if triggers.is_empty() {
+                    previous = None;
+                }
+            }
             if triggers.is_empty() {
-                previous = None;
                 tokio::select! {
                     _ = state.trigger_wake.notified() => {}
                     _ = lifecycle.recv() => {}
@@ -484,12 +523,7 @@ fn monitor_loop(app: AppHandle) {
                 }
                 continue;
             }
-            let interval = {
-                let conn = state.db.lock().ok();
-                conn.map(|conn| settings::get_i64(&conn, "monitor_interval_ms", 1000))
-                    .unwrap_or(1000)
-                    .clamp(250, 60_000)
-            };
+
             tokio::select! {
                 _ = state.trigger_wake.notified() => {}
                 event = lifecycle.recv() => {
@@ -497,67 +531,47 @@ fn monitor_loop(app: AppHandle) {
                         fire_script_event(&app, &triggers, &event);
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(interval as u64)) => {}
+                _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
             }
 
-            let raw = runner::snapshot_processes();
-            let parent_names = raw
-                .iter()
-                .map(|(pid, _parent, name)| (*pid, name.clone()))
-                .collect::<HashMap<_, _>>();
-            let previous_for_meta = previous.clone();
-            let mut current = raw
-                .iter()
-                .map(|(pid, parent, name)| {
-                    let created_ms = previous_for_meta
+            let mut snapshot: Option<HashMap<u32, ProcessMeta>> = None;
+            if needs_process_snapshot(&triggers) {
+                let raw = runner::snapshot_processes();
+                let mut current = HashMap::with_capacity(raw.len());
+                for (pid, parent, name) in raw {
+                    let created_ms = previous
                         .as_ref()
-                        .and_then(|values| values.get(pid))
+                        .and_then(|values| values.get(&pid))
                         .map(|value| value.created_ms)
                         .unwrap_or(0);
-                    (
-                        *pid,
+                    current.insert(
+                        pid,
                         ProcessMeta {
-                            pid: *pid,
-                            name: name.clone(),
-                            parent: *parent,
+                            pid,
+                            name,
+                            parent,
                             created_ms,
                             path: None,
                         },
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            for (pid, meta) in &mut current {
-                if meta.created_ms == 0 {
-                    meta.created_ms = runner::process_create_time_ms(*pid).unwrap_or(0);
+                    );
                 }
-            }
-            if let Some(previous) = previous.clone() {
-                fire_process_matches(
-                    &app,
-                    &triggers,
-                    "process_started",
-                    &current,
-                    &previous,
-                    &parent_names,
-                );
-                fire_process_matches(
-                    &app,
-                    &triggers,
-                    "process_exited",
-                    &current,
-                    &previous,
-                    &parent_names,
-                );
-            }
-            // Keep cached command lines for processes that are still alive.
-            if let Some(previous) = previous.as_ref() {
                 for (pid, meta) in &mut current {
-                    if let Some(old) = previous.get(pid) {
-                        meta.path = old.path.clone();
+                    if meta.created_ms == 0 {
+                        meta.created_ms = runner::process_create_time_ms(*pid).unwrap_or(0);
                     }
                 }
+                if let Some(previous) = previous.as_ref() {
+                    fire_process_matches(&app, &triggers, "process_started", &current, previous);
+                    fire_process_matches(&app, &triggers, "process_exited", &current, previous);
+                    // Keep cached command lines for processes that are still alive.
+                    for (pid, meta) in &mut current {
+                        if let Some(old) = previous.get(pid) {
+                            meta.path = old.path.clone();
+                        }
+                    }
+                }
+                snapshot = Some(current);
             }
-            previous = Some(current.clone());
 
             let resource_triggers = triggers
                 .iter()
@@ -569,8 +583,11 @@ fn monitor_loop(app: AppHandle) {
                 })
                 .collect::<Vec<_>>();
             if resource_triggers.is_empty() {
+                previous = snapshot;
                 continue;
             }
+            let empty = HashMap::new();
+            let processes = snapshot.as_ref().unwrap_or(&empty);
             let system = metrics::system_metrics(&mut sampler);
             let now = db::now_ms();
             for trigger in resource_triggers {
@@ -587,8 +604,7 @@ fn monitor_loop(app: AppHandle) {
                         condition,
                         &config,
                         &system,
-                        &current,
-                        &parent_names,
+                        processes,
                         cpu.entry(trigger.id.clone()).or_default(),
                     ) else {
                         all_true = false;
@@ -641,7 +657,7 @@ fn monitor_loop(app: AppHandle) {
                     }
                 }
             }
-            let _ = current;
+            previous = snapshot;
         }
     });
 }
