@@ -2,6 +2,9 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { api, formatBytes, formatDuration, formatTime, friendlyError } from "./api";
+  import Icon from "./Icon.svelte";
+  import { pageAction } from "./uiActions";
+  import type { PageAction } from "./uiActions";
   import type { LogBatchEvent, RunRecord, RunStateEvent, Script } from "./types";
 
   let {
@@ -107,6 +110,17 @@
     load();
   }
 
+  $effect(() => {
+    const action: PageAction = {
+      label: "清空历史",
+      icon: "trash",
+      kind: "danger",
+      run: clearHistory,
+    };
+    pageAction.set(action);
+    return () => pageAction.set(null);
+  });
+
   onMount(() => {
     load();
     let disposed = false;
@@ -146,10 +160,6 @@
 </script>
 
 <section class="content">
-  <div class="section-actions">
-    <button class="btn btn-danger" onclick={clearHistory}>清空历史</button>
-  </div>
-
   <div class="filter-row">
     <select class="select" bind:value={scriptFilter} onchange={setFilter}>
       <option value="">全部脚本</option>
@@ -163,7 +173,7 @@
       <option value="">全部来源</option>
       <option value="manual">手动</option><option value="schedule">定时</option><option value="loop">循环</option><option value="trigger">触发器</option><option value="adopted">接管</option>
     </select>
-    <button class="btn" onclick={load}>刷新</button>
+    <button class="btn" onclick={load}><Icon name="refresh" size={14} /> 刷新</button>
   </div>
 
   <div class="history-layout">
@@ -183,7 +193,7 @@
               <span><span class="badge" class:ok={run.status === "running" || run.status === "exited"} class:bad={run.status === "failed"}>{statusLabel(run.status)}</span></span>
               <span class="cell-sub">{formatDuration(run.started_at, run.ended_at)}</span>
               <span class="mono tiny">{run.exit_code ?? "—"}</span>
-              <span class="right"><span class="btn btn-sm" role="button" tabindex="0" onclick={(event) => { event.stopPropagation(); openFullLog(run); }} onkeydown={(event) => { if (event.key === "Enter") { event.stopPropagation(); openFullLog(run); } }}>打开</span></span>
+              <span class="right"><span class="log-open" role="button" tabindex="0" title="打开完整日志" aria-label="打开完整日志" onclick={(event) => { event.stopPropagation(); openFullLog(run); }} onkeydown={(event) => { if (event.key === "Enter") { event.stopPropagation(); openFullLog(run); } }}><Icon name="file" size={14} /></span></span>
             </button>
           {/each}
         </div>
@@ -222,7 +232,7 @@
         </div>
       {:else}
         <div class="detail-placeholder">
-          <div class="empty-icon">▤</div>
+          <div class="empty-icon"><Icon name="file" size={28} strokeWidth={1.25} /></div>
           <p>选择一条运行记录查看退出码、耗时和日志尾部。</p>
         </div>
       {/if}
@@ -231,44 +241,54 @@
 </section>
 
 <style>
-  .section-actions { display: flex; justify-content: flex-end; margin-bottom: 12px; }
-  .filter-row { display: flex; gap: 7px; margin-bottom: 12px; }
-  .filter-row .select { width: 150px; height: 32px; padding: 4px 8px; font-size: 12px; }
-  .history-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, .8fr); gap: 12px; align-items: start; }
+  .filter-row { display: flex; gap: 7px; margin-bottom: 13px; flex-wrap: wrap; }
+  .filter-row .select { width: 138px; height: 34px; padding: 5px 9px; font-size: 11px; }
+  .history-layout { display: grid; grid-template-columns: minmax(0, 1.48fr) minmax(264px, .78fr); gap: 12px; align-items: start; }
   .history-list { min-width: 0; }
-  .table-card { border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; background: #111720; }
-  .run-grid { display: grid; grid-template-columns: 132px minmax(120px, 1fr) 62px 70px 62px 52px 48px; gap: 8px; align-items: center; }
-  .table-head { padding: 9px 12px; color: var(--muted-2); font-size: 9.5px; letter-spacing: .07em; text-transform: uppercase; background: #0e141d; border-bottom: 1px solid var(--line-soft); }
-  .table-row { width: 100%; text-align: left; padding: 9px 12px; border: 0; border-bottom: 1px solid #1b222c; background: transparent; color: var(--text); font-size: 11px; }
+  .table-card { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
+  .run-grid { display: grid; grid-template-columns: 110px minmax(72px, 1fr) 46px 52px 44px 38px 30px; gap: 6px; align-items: center; }
+  .table-head {
+    padding: 11px 13px; color: #979eaa; font-size: 10px; letter-spacing: .07em;
+    text-transform: uppercase; background: #fbfbfc; border-bottom: 1px solid #f1f2f5;
+  }
+  .table-row {
+    width: 100%; text-align: left; padding: 10px 13px; border: 0;
+    border-bottom: 1px solid #f3f4f6; background: transparent; color: #4d545f; font-size: 11px;
+    transition: background .12s;
+  }
   .table-row:last-child { border-bottom: 0; }
-  .table-row:hover { background: #151d28; }
+  .table-row:hover { background: #fbfcfe; }
   .run-row { cursor: pointer; }
-  .run-row.selected { background: #17242a; box-shadow: inset 2px 0 0 var(--accent); }
-  .cell-sub { color: var(--muted); font-size: 10px; }
+  .run-row.selected { background: #eef4fc; }
+  .cell-sub { color: #969da8; font-size: 10px; }
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .badge.ok { color: #a7f3d0; border-color: #174b3e; }
-  .badge.bad { color: #fecaca; border-color: #4a2529; }
   .right { text-align: right; }
-  .detail-panel { border: 1px solid var(--line-soft); border-radius: 11px; background: #111720; padding: 14px; min-height: 320px; }
+  .log-open {
+    width: 26px; height: 26px; display: inline-grid; place-items: center;
+    border-radius: 8px; color: #9aa1ac; cursor: pointer;
+  }
+  .log-open:hover { background: #f1f3f7; color: #5b7bb9; }
+  .detail-panel { border: 1px solid #eef0f4; border-radius: 16px; background: #fff; padding: 17px; min-height: 320px; }
   .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
-  .detail-title { font-size: 14px; font-weight: 650; }
-  .detail-grid { display: grid; grid-template-columns: 78px 1fr; gap: 7px 10px; margin: 14px 0; font-size: 11px; }
-  .detail-grid span { color: var(--muted-2); }
-  .detail-grid strong { font-weight: 500; color: var(--text); }
-  .detail-error { padding: 8px 10px; border: 1px solid #4a2529; border-radius: 7px; color: #fecaca; background: #22171a; font-size: 10.5px; line-height: 1.45; margin-bottom: 12px; }
-  .log-head { margin-top: 8px; margin-bottom: 8px; align-items: center; }
-  .log-view { height: 240px; overflow: auto; background: #0b1016; border: 1px solid #1c2531; border-radius: 8px; padding: 8px; font-size: 10px; line-height: 1.55; }
-  .log-line { white-space: pre-wrap; word-break: break-word; color: #9fb0c7; }
-  .log-line:nth-child(odd) { color: #8fa1b9; }
-  .log-empty { color: var(--muted); padding: 8px; }
-  .detail-placeholder { min-height: 280px; display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--muted); font-size: 11px; text-align: center; }
-  .empty-icon { color: #3c4b60; font-size: 28px; }
+  .detail-title { font-size: 13.5px; font-weight: 550; color: #3b414a; }
+  .detail-grid { display: grid; grid-template-columns: 70px 1fr; gap: 8px 10px; margin: 16px 0; font-size: 11px; }
+  .detail-grid span { color: #a2a8b2; }
+  .detail-grid strong { font-weight: 450; color: #565e69; }
+  .detail-error { padding: 9px 11px; border: 1px solid #f2dddd; border-radius: 10px; color: #ad5c5c; background: #fffafa; font-size: 10px; line-height: 1.5; margin-bottom: 13px; }
+  .log-head { margin-top: 10px; margin-bottom: 9px; align-items: center; }
+  .log-view { height: 240px; overflow: auto; background: #f8f9fb; border: 1px solid #eef0f4; border-radius: 11px; padding: 10px; font-size: 10px; line-height: 1.65; }
+  .log-line { white-space: pre-wrap; word-break: break-word; color: #687383; }
+  .log-line:nth-child(odd) { color: #5f6b7c; }
+  .log-empty { color: #a0a7b2; padding: 8px; }
+  .detail-placeholder { min-height: 280px; display: flex; align-items: center; justify-content: center; flex-direction: column; color: #a0a7b2; font-size: 10.5px; text-align: center; }
+  .detail-placeholder p { max-width: 210px; line-height: 1.6; }
+  .empty-icon { color: #bdc5d0; display: grid; place-items: center; }
   .empty-state.small { min-height: 240px; }
-  @media (max-width: 1100px) {
+  @media (max-width: 1060px) {
     .history-layout { grid-template-columns: 1fr; }
   }
   @media (max-width: 760px) {
-    .run-grid { grid-template-columns: 120px minmax(100px, 1fr) 55px 65px 55px; }
+    .run-grid { grid-template-columns: 92px minmax(80px, 1fr) 46px 52px 44px; }
     .run-grid > :nth-child(6), .run-grid > :nth-child(7) { display: none; }
   }
 </style>

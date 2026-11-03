@@ -2,6 +2,9 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { api, formatTime, friendlyError } from "./api";
+  import Icon from "./Icon.svelte";
+  import { pageAction } from "./uiActions";
+  import type { PageAction } from "./uiActions";
   import type { Script, Trigger, TriggerEdit, TriggerEvent } from "./types";
 
   let {
@@ -292,6 +295,17 @@
     }
   }
 
+  $effect(() => {
+    const action: PageAction = {
+      label: "新建触发器",
+      icon: "plus",
+      kind: "primary",
+      run: openNew,
+    };
+    pageAction.set(action);
+    return () => pageAction.set(null);
+  });
+
   onMount(() => {
     load();
     let disposed = false;
@@ -308,18 +322,14 @@
 </script>
 
 <section class="content">
-  <div class="section-actions">
-    <button class="btn btn-primary" onclick={openNew}>+ 新建触发器</button>
-  </div>
-
   {#if loading}
     <div class="empty-state"><div class="spinner"></div>正在加载触发器…</div>
   {:else if triggers.length === 0}
     <div class="empty-state">
-      <div class="empty-icon">◇</div>
+      <div class="empty-icon"><Icon name="bolt" size={34} strokeWidth={1.25} /></div>
       <h2>还没有触发器</h2>
       <p>例如：游戏进程启动后执行准备脚本，CPU 持续高于 80% 时通知。</p>
-      <button class="btn btn-primary" onclick={openNew}>+ 新建触发器</button>
+      <button class="btn btn-primary" onclick={openNew}><Icon name="plus" size={15} /> 新建触发器</button>
     </div>
   {:else}
     <div class="trigger-grid">
@@ -340,9 +350,9 @@
           {#if trigger.last_result}<div class="cell-error" title={trigger.last_result}>{trigger.last_result}</div>{/if}
           <div class="trigger-actions">
             <button class="btn btn-sm" onclick={() => fire(trigger)}>立即触发</button>
-            <button class="btn btn-sm" onclick={() => toggle(trigger)}>{trigger.enabled ? "禁用" : "启用"}</button>
-            <button class="btn btn-sm btn-ghost" onclick={() => openEdit(trigger)}>编辑</button>
-            <button class="icon-btn btn btn-ghost" title="删除" onclick={() => remove(trigger)}>×</button>
+            <button class="btn btn-sm btn-ghost" onclick={() => toggle(trigger)}>{trigger.enabled ? "禁用" : "启用"}</button>
+            <button class="icon-btn btn btn-ghost" title="编辑" aria-label="编辑触发器" onclick={() => openEdit(trigger)}><Icon name="edit" size={15} /></button>
+            <button class="icon-btn btn btn-ghost" title="删除" aria-label="删除触发器" onclick={() => remove(trigger)}><Icon name="trash" size={15} /></button>
           </div>
         </div>
       {/each}
@@ -374,7 +384,7 @@
     <div class="modal wide" role="dialog" aria-modal="true" aria-label="编辑触发器">
       <div class="modal-head">
         <div class="modal-title">{editing ? "编辑触发器" : "新建触发器"}</div>
-        <button class="btn btn-ghost icon-btn" onclick={() => { edit = null; editing = null; }}>×</button>
+        <button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => { edit = null; editing = null; }}><Icon name="close" size={17} /></button>
       </div>
       <div class="modal-body">
         <div class="form-grid">
@@ -449,7 +459,7 @@
               <input class="input" bind:value={action.title} placeholder="通知标题" />
               <input class="input" bind:value={action.message} placeholder="通知内容" />
             {/if}
-            <button class="icon-btn btn btn-ghost" title="移除动作" onclick={() => removeAction(index)}>×</button>
+            <button class="icon-btn btn btn-ghost" title="移除动作" aria-label="移除动作" onclick={() => removeAction(index)}><Icon name="close" size={14} /></button>
           </div>
         {/each}
 
@@ -464,37 +474,42 @@
 {/if}
 
 <style>
-  .section-actions { display: flex; justify-content: flex-end; margin-bottom: 14px; }
-  .trigger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 10px; }
-  .trigger-card { border: 1px solid var(--line-soft); background: #111720; border-radius: 11px; padding: 14px; min-width: 0; }
-  .trigger-card.disabled { opacity: .55; }
+  .trigger-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 11px; }
+  .trigger-card {
+    border: 1px solid #eef0f4; background: #fff; border-radius: 16px; padding: 16px;
+    min-width: 0; transition: border-color .15s, background .15s;
+  }
+  .trigger-card:hover { border-color: #e3e7ee; background: #fdfdff; }
+  .trigger-card.disabled { opacity: .52; }
   .trigger-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-  .trigger-name { font-size: 13px; font-weight: 650; }
-  .cell-sub { color: var(--muted); font-size: 10.5px; margin-top: 3px; }
-  .trigger-rule { color: #a8b4c8; font-size: 11px; margin: 12px 0 8px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .trigger-meta { display: flex; gap: 12px; color: var(--muted-2); font-size: 10px; }
-  .cell-error { color: #fca5a5; font-size: 10px; margin-top: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .trigger-actions { display: flex; gap: 4px; margin-top: 12px; }
-  .recent-head { margin: 26px 0 10px; }
-  .recent-head h3 { font-size: 13px; margin: 0; }
-  .recent-empty { color: var(--muted); font-size: 11px; padding: 12px 0; }
-  .table-card { border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; background: #111720; }
-  .table-head { padding: 9px 13px; color: var(--muted-2); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; background: #0e141d; border-bottom: 1px solid var(--line-soft); }
-  .table-row { padding: 9px 13px; border-bottom: 1px solid #1b222c; font-size: 11px; }
+  .trigger-name { font-size: 13px; font-weight: 550; color: #3b414a; }
+  .cell-sub { color: #9ba2ad; font-size: 10.5px; margin-top: 4px; }
+  .trigger-rule { color: #7c8799; font-size: 11px; margin: 14px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trigger-meta { display: flex; gap: 12px; color: #a5abb5; font-size: 10px; }
+  .cell-error { color: #b86666; font-size: 9.5px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .trigger-actions { display: flex; gap: 3px; margin-top: 14px; align-items: center; }
+  .trigger-actions .btn:not(.btn-ghost) { background: #eef4fc; color: #4c6da9; }
+  .recent-head { margin: 28px 0 11px; }
+  .recent-head h3 { font-size: 12.5px; margin: 0; font-weight: 550; color: #4b525d; }
+  .recent-empty { color: #a3a9b3; font-size: 10.5px; padding: 13px 0; }
+  .table-card { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
+  .table-head {
+    padding: 12px 16px; color: #979eaa; font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; background: #fbfbfc; border-bottom: 1px solid #f1f2f5;
+  }
+  .table-row { padding: 12px 16px; border-bottom: 1px solid #f3f4f6; font-size: 10.5px; color: #7d8591; }
   .table-row:last-child { border-bottom: 0; }
-  .event-grid { display: grid; grid-template-columns: 150px 160px minmax(160px, 1fr) minmax(220px, 1.5fr); gap: 12px; align-items: center; }
+  .event-grid { display: grid; grid-template-columns: 130px 130px minmax(140px, 1fr) minmax(180px, 1.4fr); gap: 12px; align-items: center; }
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .form-grid.three { grid-template-columns: repeat(3, 1fr); }
-  .form-section { color: var(--muted); font-size: 11px; font-weight: 650; letter-spacing: .06em; text-transform: uppercase; border-top: 1px solid var(--line-soft); padding-top: 14px; margin: 4px 0 12px; }
+  .form-section {
+    color: #979eaa; font-size: 10px; font-weight: 600; letter-spacing: .07em;
+    text-transform: uppercase; border-top: 1px solid #f0f2f5; padding-top: 16px; margin: 6px 0 13px;
+  }
   .actions-head { display: flex; align-items: center; justify-content: space-between; }
-  .action-row { display: grid; grid-template-columns: 130px minmax(130px, 1fr) auto; gap: 6px; margin-bottom: 7px; align-items: center; }
+  .action-row { display: grid; grid-template-columns: 130px minmax(130px, 1fr) auto; gap: 7px; margin-bottom: 8px; align-items: center; }
   .action-row:has(input) { grid-template-columns: 130px minmax(100px, .8fr) minmax(130px, 1.4fr) auto; }
   .cooldown-field { max-width: 200px; }
-  .check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; margin-top: 8px; }
-  .check-row input { accent-color: var(--accent-strong); }
   @media (max-width: 900px) {
-    .form-grid, .form-grid.three { grid-template-columns: 1fr; }
     .event-grid { grid-template-columns: 110px 120px minmax(120px, 1fr); }
     .event-grid > :nth-child(4) { display: none; }
   }

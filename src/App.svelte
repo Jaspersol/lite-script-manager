@@ -7,6 +7,8 @@
   import Triggers from "./lib/Triggers.svelte";
   import History from "./lib/History.svelte";
   import SettingsPage from "./lib/SettingsPage.svelte";
+  import Icon from "./lib/Icon.svelte";
+  import { pageAction } from "./lib/uiActions";
   import type { RunStateEvent, RuntimeInfo, RuntimeMeta, Script, ScriptEdit, Settings } from "./lib/types";
 
   type Tab = "scripts" | "schedules" | "triggers" | "history" | "runtimes" | "settings";
@@ -66,6 +68,10 @@
 
   function runtimeName(id: string): string {
     return catalog.find((item) => item.id === id)?.name ?? id;
+  }
+
+  function displayPath(path: string): string {
+    return path.replace(/^\\\\\?\\/, "");
   }
 
   function isBusy(script: Script): boolean {
@@ -314,6 +320,7 @@
   }
 
   function switchTab(tab: Tab) {
+    pageAction.set(null);
     activeTab = tab;
     if (tab === "runtimes" && runtimes.length === 0) loadRuntimes(false);
   }
@@ -380,24 +387,24 @@
     </div>
 
     <nav class="nav">
-      <button class:active={activeTab === "scripts"} onclick={() => switchTab("scripts")}>
-        <span class="nav-icon">▤</span> 脚本
+      <button class:active={activeTab === "scripts"} title="脚本" onclick={() => switchTab("scripts")}>
+        <span class="nav-icon"><Icon name="grid" size={17} /></span> 脚本
         <span class="nav-count">{scripts.length}</span>
       </button>
-      <button class:active={activeTab === "schedules"} onclick={() => switchTab("schedules")}>
-        <span class="nav-icon">◷</span> 计划任务
+      <button class:active={activeTab === "schedules"} title="计划任务" onclick={() => switchTab("schedules")}>
+        <span class="nav-icon"><Icon name="clock" size={17} /></span> 计划任务
       </button>
-      <button class:active={activeTab === "triggers"} onclick={() => switchTab("triggers")}>
-        <span class="nav-icon">⚡</span> 事件触发器
+      <button class:active={activeTab === "triggers"} title="事件触发器" onclick={() => switchTab("triggers")}>
+        <span class="nav-icon"><Icon name="bolt" size={17} /></span> 事件触发器
       </button>
-      <button class:active={activeTab === "history"} onclick={() => switchTab("history")}>
-        <span class="nav-icon">≡</span> 运行历史
+      <button class:active={activeTab === "history"} title="运行历史" onclick={() => switchTab("history")}>
+        <span class="nav-icon"><Icon name="history" size={17} /></span> 运行历史
       </button>
-      <button class:active={activeTab === "runtimes"} onclick={() => switchTab("runtimes")}>
-        <span class="nav-icon">◇</span> 运行时环境
+      <button class:active={activeTab === "runtimes"} title="运行时环境" onclick={() => switchTab("runtimes")}>
+        <span class="nav-icon"><Icon name="code" size={17} /></span> 运行时环境
       </button>
-      <button class:active={activeTab === "settings"} onclick={() => switchTab("settings")}>
-        <span class="nav-icon">⚙</span> 设置
+      <button class:active={activeTab === "settings"} title="设置" onclick={() => switchTab("settings")}>
+        <span class="nav-icon"><Icon name="sliders" size={17} /></span> 设置
       </button>
     </nav>
 
@@ -419,10 +426,20 @@
       </div>
       <div class="topbar-actions">
         {#if activeTab === "scripts"}
-          <button class="btn" onclick={openAddPath}>从路径添加</button>
-          <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}>+ 新建脚本</button>
+          <button class="btn btn-ghost" onclick={openAddPath}><Icon name="folder" size={15} /> 从路径添加</button>
+          <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}><Icon name="plus" size={15} /> 新建脚本</button>
         {:else if activeTab === "runtimes"}
-          <button class="btn" disabled={runtimeLoading} onclick={() => loadRuntimes(true)}>{runtimeLoading ? "检测中…" : "重新检测"}</button>
+          <button class="btn" disabled={runtimeLoading} onclick={() => loadRuntimes(true)}><Icon name="refresh" size={15} /> {runtimeLoading ? "检测中…" : "重新检测"}</button>
+        {:else if $pageAction}
+          <button
+            class="btn"
+            class:btn-primary={$pageAction.kind !== "danger"}
+            class:btn-danger={$pageAction.kind === "danger"}
+            disabled={$pageAction.disabled}
+            onclick={$pageAction.run}
+          >
+            <Icon name={$pageAction.icon} size={15} /> {$pageAction.label}
+          </button>
         {/if}
       </div>
     </header>
@@ -431,7 +448,7 @@
       <section class="content">
         <div class="toolbar">
           <div class="search-wrap">
-            <span class="search-icon">⌕</span>
+            <span class="search-icon"><Icon name="search" size={16} /></span>
             <input class="input search" placeholder="搜索名称、路径或运行时…" bind:value={search} />
           </div>
           <div class="toolbar-meta">{filteredScripts.length} 个脚本</div>
@@ -441,13 +458,13 @@
           <div class="empty-state"><div class="spinner"></div>正在加载脚本…</div>
         {:else if filteredScripts.length === 0}
           <div class="empty-state">
-            <div class="empty-icon">▤</div>
+            <div class="empty-icon"><Icon name="grid" size={34} strokeWidth={1.25} /></div>
             <h2>{scripts.length === 0 ? "还没有脚本" : "没有匹配的脚本"}</h2>
             <p>{scripts.length === 0 ? "从已有文件添加，或直接创建一个新脚本。" : "换一个关键词试试。"}</p>
             {#if scripts.length === 0}
               <div class="empty-actions">
-                <button class="btn" onclick={openAddPath}>从路径添加</button>
-                <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}>+ 新建脚本</button>
+                <button class="btn btn-ghost" onclick={openAddPath}>从路径添加</button>
+                <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}><Icon name="plus" size={15} /> 新建脚本</button>
               </div>
             {/if}
           </div>
@@ -478,7 +495,7 @@
                     {#if !script.enabled}<span class="badge">已禁用</span>{/if}
                     {#if script.last_error}<span class="error-dot" title={script.last_error}></span>{/if}
                   </div>
-                  <div class="script-path mono" title={script.path}>{script.path}</div>
+                  <div class="script-path mono" title={script.path}>{displayPath(script.path)}</div>
                 </div>
                 <div><span class="badge runtime-badge">{runtimeName(script.runtime_id)}</span></div>
                 <div class="status-cell">
@@ -487,10 +504,10 @@
                 </div>
                 <div class="row-actions">
                   <button class="btn btn-sm run-btn" class:stop={script.status === "running"} disabled={!script.enabled || script.status === "starting" || script.status === "stopping" || script.status === "queued"} onclick={() => toggleScript(script)}>
-                    {#if script.status === "running"}■ 停止{:else if script.status === "starting"}启动中…{:else if script.status === "stopping"}停止中…{:else if script.status === "queued"}排队中…{:else}▶ 启动{/if}
+                    {#if script.status === "running"}<Icon name="stop" size={12} /> 停止{:else if script.status === "starting"}启动中…{:else if script.status === "stopping"}停止中…{:else if script.status === "queued"}排队中…{:else}<Icon name="play" size={12} /> 启动{/if}
                   </button>
-                  <button class="btn btn-sm btn-ghost" onclick={() => openEdit(script)}>编辑</button>
-                  <button class="icon-btn btn btn-ghost" title="移除" onclick={() => deleteScript(script)}>×</button>
+                  <button class="icon-btn btn btn-ghost" title="编辑" aria-label="编辑脚本" onclick={() => openEdit(script)}><Icon name="edit" size={15} /></button>
+                  <button class="icon-btn btn btn-ghost" title="移除" aria-label="移除脚本" onclick={() => deleteScript(script)}><Icon name="trash" size={15} /></button>
                 </div>
               </div>
             {/each}
@@ -513,7 +530,11 @@
         {#if runtimeLoading && runtimes.length === 0}
           <div class="empty-state"><div class="spinner"></div>正在检测运行时…</div>
         {:else if runtimes.length === 0}
-          <div class="empty-state"><h2>尚未检测</h2><p>点击右上角“重新检测”开始扫描本机环境。</p><button class="btn btn-primary" onclick={() => loadRuntimes(true)}>开始检测</button></div>
+          <div class="empty-state">
+            <div class="empty-icon"><Icon name="code" size={34} strokeWidth={1.25} /></div>
+            <h2>尚未检测</h2><p>点击右上角“重新检测”开始扫描本机环境。</p>
+            <button class="btn btn-primary" onclick={() => loadRuntimes(true)}>开始检测</button>
+          </div>
         {:else}
           <div class="runtime-grid">
             {#each runtimes as runtime (runtime.id)}
@@ -555,7 +576,7 @@
 {#if showAdd}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) showAdd = false; }}>
     <div class="modal" role="dialog" aria-modal="true" aria-label="添加脚本">
-      <div class="modal-head"><div class="modal-title">添加脚本</div><button class="btn btn-ghost icon-btn" onclick={() => showAdd = false}>×</button></div>
+      <div class="modal-head"><div class="modal-title">添加脚本</div><button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => showAdd = false}><Icon name="close" size={17} /></button></div>
       <div class="modal-body">
         <div class="segmented">
           <button class:active={addMode === "path"} onclick={() => addMode = "path"}>从路径添加</button>
@@ -589,7 +610,7 @@
 {#if editScript}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) editScript = null; }}>
     <div class="modal" role="dialog" aria-modal="true" aria-label="编辑脚本">
-      <div class="modal-head"><div class="modal-title">编辑脚本</div><button class="btn btn-ghost icon-btn" onclick={() => editScript = null}>×</button></div>
+      <div class="modal-head"><div class="modal-title">编辑脚本</div><button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => editScript = null}><Icon name="close" size={17} /></button></div>
       <div class="modal-body">
         <div class="field"><label class="label" for="edit-name">名称</label><input id="edit-name" class="input" bind:value={editScript.name} /></div>
         <div class="field"><div class="label">路径</div><div class="path-value mono">{editScript.path}</div></div>
@@ -661,106 +682,143 @@
 {/if}
 
 <style>
-  .shell { display: grid; grid-template-columns: 224px minmax(0, 1fr); height: 100vh; }
-  .sidebar { display: flex; flex-direction: column; padding: 20px 14px 16px; background: #10151e; border-right: 1px solid var(--line-soft); min-width: 0; }
-  .brand { display: flex; gap: 11px; align-items: center; padding: 2px 8px 24px; }
-  .brand-mark { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; background: linear-gradient(145deg, #5eead4, #2dd4bf); color: #06241f; font-weight: 800; font-size: 12px; letter-spacing: -.4px; }
-  .brand-name { font-size: 13px; font-weight: 700; letter-spacing: .1px; }
-  .brand-sub { color: var(--muted-2); font-size: 10px; margin-top: 2px; }
-  .nav { display: grid; gap: 4px; }
-  .nav button { display: flex; align-items: center; gap: 9px; height: 38px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 13px; text-align: left; }
-  .nav button:hover { background: #171e29; color: var(--text); }
-  .nav button.active { background: #1b2432; color: var(--text); box-shadow: inset 2px 0 0 var(--accent); }
-  .nav-icon { width: 16px; text-align: center; color: var(--muted-2); font-size: 13px; }
-  .nav button.active .nav-icon { color: var(--accent); }
-  .nav-count { margin-left: auto; font-size: 10px; color: var(--muted-2); background: #0d121a; border: 1px solid var(--line-soft); border-radius: 5px; padding: 1px 5px; }
+  .shell {
+    display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 12px;
+    height: 100vh; padding: 12px; background: var(--bg);
+  }
+  .sidebar {
+    display: flex; flex-direction: column; padding: 20px 13px 14px;
+    background: #f8f8fa; border-radius: 18px; min-width: 0;
+  }
+  .brand { display: flex; gap: 10px; align-items: center; padding: 4px 8px 28px; }
+  .brand-mark {
+    width: 31px; height: 31px; border-radius: 9px; display: grid; place-items: center;
+    background: #e8eefb; color: #4a6bb8; font-weight: 700; font-size: 10px; letter-spacing: -.2px;
+  }
+  .brand-name { font-size: 13px; font-weight: 600; letter-spacing: -.1px; color: #343941; }
+  .brand-sub { color: #a4aab4; font-size: 9.5px; margin-top: 3px; letter-spacing: .1px; }
+  .nav { display: grid; gap: 3px; }
+  .nav button {
+    display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 12px;
+    border: 0; border-radius: 11px; background: transparent; color: #707784;
+    font-size: 13px; text-align: left; transition: background .15s, color .15s;
+  }
+  .nav button:hover { background: #f0f1f5; color: #414852; }
+  .nav button.active { background: #e9effb; color: #37578f; font-weight: 550; }
+  .nav-icon { width: 18px; display: grid; place-items: center; color: #9aa1ac; flex: 0 0 auto; }
+  .nav button.active .nav-icon { color: #5a79c4; }
+  .nav-count { margin-left: auto; font-size: 10px; color: #a1a7b1; padding: 1px 2px; }
+  .nav button.active .nav-count { color: #6d84b8; }
   .sidebar-bottom { margin-top: auto; }
-  .mini-card { border: 1px solid var(--line-soft); background: #121a24; border-radius: 10px; padding: 12px; }
-  .mini-card-top { display: flex; gap: 7px; align-items: center; color: var(--muted); font-size: 11px; }
-  .mini-card-value { font-size: 12px; margin-top: 10px; color: var(--text); }
-  .mini-card-hint { font-size: 10px; color: var(--muted-2); margin-top: 4px; line-height: 1.4; }
-  .version { color: #4e5a6e; font-size: 10px; padding: 14px 4px 0; }
-  .workspace { min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
-  .topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 26px 32px 20px; border-bottom: 1px solid var(--line-soft); }
-  .topbar h1 { margin: 0; font-size: 22px; letter-spacing: -.4px; font-weight: 680; }
-  .topbar p { margin: 5px 0 0; color: var(--muted); font-size: 12px; }
-  .topbar-actions { display: flex; gap: 8px; padding-top: 2px; }
-  .content { flex: 1; overflow: auto; padding: 22px 32px 32px; }
-  .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 14px; }
-  .search-wrap { position: relative; width: min(380px, 100%); }
-  .search-icon { position: absolute; left: 10px; top: 7px; color: var(--muted-2); font-size: 17px; line-height: 1; }
-  .search { padding-left: 31px; height: 34px; }
-  .toolbar-meta { margin-left: auto; color: var(--muted-2); font-size: 11px; }
-  .script-list { border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; background: #111720; }
-  .list-head, .script-row { display: grid; grid-template-columns: 22px minmax(220px, 1fr) 128px 90px 210px; gap: 12px; align-items: center; }
-  .list-head { padding: 10px 14px; color: var(--muted-2); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; background: #0e141d; border-bottom: 1px solid var(--line-soft); }
+  .mini-card {
+    border: 1px solid #eef0f4; background: rgba(255, 255, 255, .78);
+    border-radius: 14px; padding: 14px; box-shadow: 0 1px 2px rgba(35, 44, 62, .025);
+  }
+  .mini-card-top { display: flex; gap: 8px; align-items: center; color: #858c97; font-size: 10.5px; }
+  .mini-card-value { font-size: 12px; margin-top: 10px; color: #444a53; font-weight: 550; }
+  .mini-card-hint { font-size: 9.5px; color: #a7adb7; margin-top: 4px; line-height: 1.45; }
+  .version { color: #b3b8c1; font-size: 9.5px; padding: 14px 4px 2px; }
+  .workspace {
+    min-width: 0; display: flex; flex-direction: column; overflow: hidden;
+    background: #fff; border: 1px solid #eef0f4; border-radius: 18px;
+  }
+  .topbar {
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
+    padding: 30px 34px 18px;
+  }
+  .topbar h1 { margin: 0; font-size: 20px; letter-spacing: -.3px; font-weight: 600; color: #30353d; }
+  .topbar p { margin: 7px 0 0; color: #969da8; font-size: 11.5px; line-height: 1.5; }
+  .topbar-actions { display: flex; gap: 7px; padding-top: 2px; }
+  .content { flex: 1; overflow: auto; padding: 8px 34px 34px; }
+  .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 15px; }
+  .search-wrap { position: relative; width: min(360px, 100%); }
+  .search-icon {
+    position: absolute; left: 12px; top: 50%; transform: translateY(-50%);
+    color: #a8aeb8; line-height: 1; pointer-events: none; display: flex;
+  }
+  .search { padding-left: 36px; height: 36px; }
+  .toolbar-meta { margin-left: auto; color: #a8aeb8; font-size: 10.5px; }
+  .script-list { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
+  .list-head, .script-row {
+    display: grid; grid-template-columns: 20px minmax(180px, 1fr) 116px 76px 130px;
+    gap: 12px; align-items: center;
+  }
+  .list-head {
+    padding: 12px 16px; color: #979eaa; font-size: 9.5px; text-transform: uppercase;
+    letter-spacing: .08em; background: #fbfbfc; border-bottom: 1px solid #f1f2f5;
+  }
   .col-actions { text-align: right; }
-  .script-row { padding: 12px 14px; border-bottom: 1px solid #1b222c; transition: background .12s, opacity .12s; }
+  .script-row { padding: 14px 16px; border-bottom: 1px solid #f3f4f6; transition: background .12s, opacity .12s; }
   .script-row:last-child { border-bottom: 0; }
-  .script-row:hover { background: #151d28; }
-  .script-row.dragging { opacity: .45; }
-  .drag-handle { color: #4d5a6e; font-size: 15px; cursor: grab; user-select: none; }
+  .script-row:hover { background: #fbfcfe; }
+  .script-row.dragging { opacity: .42; }
+  .drag-handle { color: #c3c8d1; font-size: 14px; cursor: grab; user-select: none; }
   .script-main { min-width: 0; }
   .script-name-line { display: flex; align-items: center; gap: 7px; min-width: 0; }
-  .script-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .script-path { color: #647188; font-size: 10.5px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .error-dot { width: 6px; height: 6px; background: var(--danger); border-radius: 50%; flex: 0 0 auto; }
-  .runtime-badge { color: #a8b4c8; }
-  .status-cell { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+  .script-name { font-size: 12.8px; font-weight: 550; color: #383e47; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .script-path { color: #a3a9b3; font-size: 10px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .error-dot { width: 5px; height: 5px; background: var(--danger); border-radius: 50%; flex: 0 0 auto; }
+  .runtime-badge { color: #7b8494; background: #f4f6fa; }
+  .status-cell { display: flex; align-items: center; gap: 7px; color: #7f8793; font-size: 10.5px; white-space: nowrap; }
   .row-actions { display: flex; justify-content: flex-end; gap: 3px; }
-  .run-btn { min-width: 58px; border-color: #2d3a4d; }
-  .run-btn.stop { color: #fecaca; border-color: #4a2529; background: #2a171a; }
-  .empty-state { min-height: 300px; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); text-align: center; border: 1px dashed #263040; border-radius: 12px; background: rgba(17, 23, 32, .45); }
-  .empty-state h2 { color: var(--text); margin: 12px 0 4px; font-size: 16px; }
-  .empty-state p { margin: 0 0 16px; font-size: 12px; }
-  .empty-icon { font-size: 34px; color: #3c4b60; }
+  .run-btn { min-width: 64px; background: #eef4fc; color: #4c6da9; }
+  .run-btn:hover { background: #e3edfb; color: #3d5f9f; }
+  .run-btn.stop { color: #b46060; background: #fbf0f0; }
+  .run-btn.stop:hover { background: #f9e7e7; }
+  .empty-state { min-height: 300px; }
   .empty-actions { display: flex; gap: 8px; }
-  .spinner { width: 22px; height: 22px; border: 2px solid #2b394b; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 12px; }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .runtime-summary { display: flex; align-items: baseline; gap: 26px; padding: 14px 16px; border: 1px solid var(--line-soft); border-radius: 10px; background: #111720; margin-bottom: 16px; }
-  .runtime-summary strong { font-size: 20px; color: var(--text); margin-right: 3px; }
-  .runtime-summary span { color: var(--muted); font-size: 11px; }
-  .runtime-summary .tiny { margin-left: auto; }
+  .runtime-summary {
+    display: flex; align-items: baseline; gap: 28px; padding: 16px 18px;
+    border: 1px solid #eef0f4; border-radius: 16px; background: #fbfbfc; margin-bottom: 14px;
+  }
+  .runtime-summary strong { font-size: 20px; color: #39404a; margin-right: 3px; font-weight: 550; }
+  .runtime-summary span { color: #8b929d; font-size: 10.5px; }
+  .runtime-summary .tiny { margin-left: auto; color: #a8aeb8; }
   .runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(245px, 1fr)); gap: 10px; }
-  .runtime-card { padding: 14px; border: 1px solid var(--line-soft); border-radius: 10px; background: #121923; min-width: 0; }
-  .runtime-card.missing { opacity: .72; }
+  .runtime-card { padding: 16px; border: 1px solid #eef0f4; border-radius: 16px; background: #fff; min-width: 0; transition: border-color .15s, background .15s; }
+  .runtime-card:hover { border-color: #e4e8f0; background: #fdfdff; }
+  .runtime-card.missing { opacity: .66; }
   .runtime-head { display: flex; align-items: center; gap: 8px; }
-  .runtime-head strong { font-size: 12.5px; }
+  .runtime-head strong { font-size: 12.5px; font-weight: 550; color: #3d434c; }
   .runtime-head .badge { margin-left: auto; }
-  .runtime-version { color: var(--accent); font-size: 11px; margin: 12px 0 5px; }
-  .runtime-path { color: #637086; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .runtime-error { color: #fca5a5; font-size: 10px; margin-top: 7px; line-height: 1.4; }
-  .settings-card { max-width: 720px; padding: 22px; border: 1px solid var(--line-soft); border-radius: 12px; background: #111720; }
-    .setting-row { display: flex; justify-content: space-between; gap: 20px; border-top: 1px solid var(--line-soft); padding: 15px 0; }
+  .runtime-version { color: #5c7cc1; font-size: 10.5px; margin: 12px 0 5px; }
+  .runtime-path { color: #a1a7b2; font-size: 9.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .runtime-error { color: #b36666; font-size: 10px; margin-top: 7px; line-height: 1.45; }
   .path-picker { display: flex; gap: 10px; align-items: center; margin: 18px 0 10px; }
-  .path-value { flex: 1; min-width: 0; border: 1px solid var(--line); background: #0f141d; color: var(--muted); border-radius: 8px; padding: 9px 10px; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .small { min-height: 74px; font-size: 12px; }
-  .editor { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
-  .check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-  .check-row input { accent-color: var(--accent-strong); }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-  .hash-row { display: flex; align-items: center; gap: 10px; justify-content: space-between; border: 1px solid var(--line); background: #0f141d; border-radius: 8px; padding: 8px 10px; }
-  .hash-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-  .runtime-details { margin-top: 9px; border-top: 1px solid var(--line-soft); padding-top: 8px; color: var(--muted); font-size: 9.5px; line-height: 1.5; }
-  .runtime-candidates { margin-top: 8px; font-size: 10px; color: var(--muted); }
-  .runtime-candidates summary { cursor: pointer; color: var(--muted-2); }
+  .path-value {
+    flex: 1; min-width: 0; border: 1px solid #f0f1f4; background: #f7f8fa; color: #8b929e;
+    border-radius: 10px; padding: 9px 11px; font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .small { min-height: 74px; font-size: 11.5px; }
+  .editor { font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
+  .form-grid { gap: 11px; }
+  .hash-row {
+    display: flex; align-items: center; gap: 10px; justify-content: space-between;
+    border: 1px solid #f0f1f4; background: #f7f8fa; border-radius: 10px; padding: 8px 11px;
+  }
+  .hash-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9aa1ac; }
+  .runtime-details { margin-top: 10px; border-top: 1px solid #f2f3f6; padding-top: 9px; color: #9aa1ac; font-size: 9.5px; line-height: 1.55; }
+  .runtime-candidates { margin-top: 8px; font-size: 9.5px; color: #9aa1ac; }
+  .runtime-candidates summary { cursor: pointer; color: #aeb4be; }
   .candidate-row { display: flex; align-items: center; gap: 5px; margin-top: 6px; min-width: 0; }
   .candidate-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .first-run-lead { color: var(--text); font-size: 12.5px; line-height: 1.6; margin: 0 0 16px; }
-  .first-run-list { display: grid; gap: 10px; margin-bottom: 14px; }
-  .first-run-list div { border: 1px solid var(--line-soft); background: #0f141d; border-radius: 8px; padding: 10px 11px; }
-  .first-run-list strong { display: block; font-size: 12px; margin-bottom: 3px; }
-  .first-run-list span { color: var(--muted); font-size: 11px; line-height: 1.45; }
-  @media (max-width: 900px) {
-    .shell { grid-template-columns: 68px minmax(0, 1fr); }
-    .brand > div:last-child, .nav button:not(.active) .nav-count, .nav button { font-size: 0; }
-    .nav button { justify-content: center; padding: 0; }
-    .nav-icon { font-size: 15px; }
+  .first-run-lead { color: #525964; font-size: 12px; line-height: 1.7; margin: 0 0 17px; }
+  .first-run-list { display: grid; gap: 9px; margin-bottom: 15px; }
+  .first-run-list div { border: 1px solid #f0f2f5; background: #fbfbfc; border-radius: 12px; padding: 12px 13px; }
+  .first-run-list strong { display: block; font-size: 11.5px; margin-bottom: 3px; color: #414852; }
+  .first-run-list span { color: #9299a4; font-size: 10.5px; line-height: 1.5; }
+  @media (max-width: 980px) {
+    .shell { grid-template-columns: 72px minmax(0, 1fr); }
+    .brand { justify-content: center; padding-left: 0; padding-right: 0; }
+    .brand > div:last-child, .nav-count { display: none; }
+    .nav button { justify-content: center; padding: 0; font-size: 0; }
+    .nav-icon { width: auto; }
     .sidebar-bottom { display: none; }
-    .list-head, .script-row { grid-template-columns: 20px minmax(160px, 1fr) 90px 76px; }
+    .topbar { padding: 24px 24px 16px; }
+    .content { padding: 6px 24px 26px; }
+  }
+  @media (max-width: 900px) {
+    .list-head, .script-row { grid-template-columns: 20px minmax(150px, 1fr) 90px 130px; }
     .list-head span:nth-child(3), .script-row > div:nth-child(3) { display: none; }
-    .row-actions .btn-ghost { display: none; }
-    .topbar { padding: 20px; }
-    .content { padding: 16px 20px 24px; }
   }
 </style>

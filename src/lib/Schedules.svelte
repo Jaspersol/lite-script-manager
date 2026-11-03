@@ -2,6 +2,9 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { api, formatTime, friendlyError } from "./api";
+  import Icon from "./Icon.svelte";
+  import { pageAction } from "./uiActions";
+  import type { PageAction } from "./uiActions";
   import type { Schedule, ScheduleEdit, Script } from "./types";
 
   let {
@@ -181,6 +184,18 @@
     }[status ?? ""] ?? "未运行";
   }
 
+  $effect(() => {
+    const action: PageAction = {
+      label: "新建计划",
+      icon: "plus",
+      kind: "primary",
+      disabled: scripts.length === 0,
+      run: openNew,
+    };
+    pageAction.set(action);
+    return () => pageAction.set(null);
+  });
+
   onMount(() => {
     load();
     let disposed = false;
@@ -197,18 +212,14 @@
 </script>
 
 <section class="content">
-  <div class="section-actions">
-    <button class="btn btn-primary" onclick={openNew} disabled={scripts.length === 0}>+ 新建计划</button>
-  </div>
-
   {#if loading}
     <div class="empty-state"><div class="spinner"></div>正在加载计划…</div>
   {:else if schedules.length === 0}
     <div class="empty-state">
-      <div class="empty-icon">◷</div>
+      <div class="empty-icon"><Icon name="clock" size={34} strokeWidth={1.25} /></div>
       <h2>还没有计划任务</h2>
       <p>为脚本设置固定间隔、Cron 或后台循环重启。</p>
-      <button class="btn btn-primary" onclick={openNew} disabled={scripts.length === 0}>+ 新建计划</button>
+      <button class="btn btn-primary" onclick={openNew} disabled={scripts.length === 0}><Icon name="plus" size={15} /> 新建计划</button>
     </div>
   {:else}
     <div class="table-card">
@@ -232,10 +243,10 @@
             {#if schedule.last_error}<div class="cell-error" title={schedule.last_error}>{schedule.last_error}</div>{/if}
           </div>
           <div class="row-actions">
-            <button class="btn btn-sm" onclick={() => runNow(schedule)}>立即执行</button>
-            <button class="btn btn-sm" onclick={() => toggle(schedule)}>{schedule.enabled ? "禁用" : "启用"}</button>
-            <button class="btn btn-sm btn-ghost" onclick={() => openEdit(schedule)}>编辑</button>
-            <button class="icon-btn btn btn-ghost" title="删除" onclick={() => remove(schedule)}>×</button>
+            <button class="btn btn-sm" onclick={() => runNow(schedule)}>执行</button>
+            <button class="btn btn-sm btn-ghost" onclick={() => toggle(schedule)}>{schedule.enabled ? "禁用" : "启用"}</button>
+            <button class="icon-btn btn btn-ghost" title="编辑" aria-label="编辑计划" onclick={() => openEdit(schedule)}><Icon name="edit" size={15} /></button>
+            <button class="icon-btn btn btn-ghost" title="删除" aria-label="删除计划" onclick={() => remove(schedule)}><Icon name="trash" size={15} /></button>
           </div>
         </div>
       {/each}
@@ -248,7 +259,7 @@
     <div class="modal wide" role="dialog" aria-modal="true" aria-label="编辑计划">
       <div class="modal-head">
         <div class="modal-title">{editing ? "编辑计划" : "新建计划"}</div>
-        <button class="btn btn-ghost icon-btn" onclick={() => { edit = null; editing = null; }}>×</button>
+        <button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => { edit = null; editing = null; }}><Icon name="close" size={17} /></button>
       </div>
       <div class="modal-body">
         <div class="form-grid">
@@ -365,40 +376,37 @@
 {/if}
 
 <style>
-  .section-actions { display: flex; justify-content: flex-end; margin-bottom: 14px; }
-  .table-card { border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; background: #111720; }
-  .schedule-grid { display: grid; grid-template-columns: minmax(150px, 1.15fr) 130px minmax(180px, 1.3fr) 150px 130px 248px; gap: 12px; align-items: center; }
-  .table-head { padding: 10px 14px; color: var(--muted-2); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; background: #0e141d; border-bottom: 1px solid var(--line-soft); }
-  .table-row { padding: 12px 14px; border-bottom: 1px solid #1b222c; font-size: 12px; }
+  .table-card { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
+  .schedule-grid {
+    display: grid; grid-template-columns: minmax(130px, 1.1fr) 100px minmax(130px, 1.2fr) 110px 92px 156px;
+    gap: 10px; align-items: center;
+  }
+  .table-head {
+    padding: 12px 16px; color: #979eaa; font-size: 10px; letter-spacing: .08em;
+    text-transform: uppercase; background: #fbfbfc; border-bottom: 1px solid #f1f2f5;
+  }
+  .table-row { padding: 14px 16px; border-bottom: 1px solid #f3f4f6; font-size: 12px; transition: background .12s; }
   .table-row:last-child { border-bottom: 0; }
-  .table-row:hover { background: #151d28; }
-  .disabled-row { opacity: .55; }
-  .cell-title { font-weight: 600; display: flex; align-items: center; gap: 6px; }
-  .cell-sub { color: var(--muted); font-size: 10.5px; margin-top: 3px; }
-  .cell-error { color: #fca5a5; font-size: 10px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
-  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-  .expression { color: #a8b4c8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .row-actions { display: flex; justify-content: flex-end; gap: 4px; }
+  .table-row:hover { background: #fbfcfe; }
+  .disabled-row { opacity: .5; }
+  .cell-title { font-weight: 550; display: flex; align-items: center; gap: 6px; color: #3c424b; }
+  .cell-sub { color: #989fa9; font-size: 10.5px; margin-top: 4px; }
+  .cell-error { color: #b86666; font-size: 9.5px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #7d8591; }
+  .expression { color: #7c8799; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row-actions { display: flex; justify-content: flex-end; gap: 3px; align-items: center; }
+  .row-actions .btn:not(.btn-ghost) { background: #eef4fc; color: #4c6da9; }
   .right { text-align: right; }
-  .badge.ok { color: #a7f3d0; border-color: #174b3e; }
-  .badge.bad { color: #fecaca; border-color: #4a2529; }
-  .badge.warn { color: #fde68a; border-color: #4b3a16; }
-  .empty-state { min-height: 260px; }
-  .empty-icon { font-size: 34px; color: #3c4b60; }
-  .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .form-grid.three { grid-template-columns: repeat(3, 1fr); }
-  .quick-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin: -4px 0 12px; }
-  .preview-box { border: 1px solid var(--line-soft); background: #0f141d; border-radius: 9px; padding: 11px 12px; margin: 4px 0 14px; }
-  .preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; font-size: 12px; }
-  .preview-list { color: var(--accent); font-size: 11px; line-height: 1.6; }
-  .check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
-  .check-row input { accent-color: var(--accent-strong); }
+  .empty-state { min-height: 280px; }
+  .quick-row { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; margin: -4px 0 13px; }
+  .preview-box { border: 1px solid #eef0f4; background: #fbfbfc; border-radius: 12px; padding: 12px 13px; margin: 4px 0 15px; }
+  .preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-size: 11.5px; color: #555d68; }
+  .preview-list { color: #5d7bb8; font-size: 10.5px; line-height: 1.65; }
   @media (max-width: 1100px) {
-    .schedule-grid { grid-template-columns: minmax(140px, 1fr) 110px minmax(140px, 1fr) 120px 100px 218px; }
+    .schedule-grid { grid-template-columns: minmax(115px, 1fr) 84px minmax(110px, 1fr) 96px 78px 156px; gap: 8px; }
   }
   @media (max-width: 900px) {
-    .schedule-grid { grid-template-columns: minmax(160px, 1fr) 110px 120px 190px; }
+    .schedule-grid { grid-template-columns: minmax(130px, 1fr) 92px 110px 90px 156px; }
     .table-row > div:nth-child(3), .table-head > span:nth-child(3) { display: none; }
-    .form-grid, .form-grid.three { grid-template-columns: 1fr; }
   }
 </style>

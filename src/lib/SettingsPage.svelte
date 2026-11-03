@@ -2,6 +2,8 @@
   import { onMount } from "svelte";
   import { listen } from "@tauri-apps/api/event";
   import { api, friendlyError } from "./api";
+  import { pageAction } from "./uiActions";
+  import type { PageAction } from "./uiActions";
   import type { Settings } from "./types";
 
   let {
@@ -48,6 +50,18 @@
     }
   }
 
+  $effect(() => {
+    const action: PageAction = {
+      label: saving ? "保存中…" : "保存设置",
+      icon: "sliders",
+      kind: "primary",
+      disabled: saving || loading,
+      run: save,
+    };
+    pageAction.set(action);
+    return () => pageAction.set(null);
+  });
+
   onMount(() => {
     load();
     let disposed = false;
@@ -64,10 +78,6 @@
 </script>
 
 <section class="content">
-  <div class="section-actions">
-    <button class="btn btn-primary" disabled={saving || loading} onclick={save}>{saving ? "保存中…" : "保存设置"}</button>
-  </div>
-
   {#if loading}
     <div class="empty-state"><div class="spinner"></div>正在加载设置…</div>
   {:else}
@@ -132,13 +142,12 @@
 </section>
 
 <style>
-  .section-actions { display: flex; justify-content: flex-end; margin-bottom: 14px; }
-  .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
-  .settings-card { border: 1px solid var(--line-soft); background: #111720; border-radius: 11px; padding: 16px; }
-  .settings-card h3 { margin: 0 0 14px; font-size: 12px; color: var(--text); letter-spacing: .02em; }
-  .setting-check { display: flex; align-items: flex-start; gap: 8px; color: var(--muted); font-size: 12px; line-height: 1.45; margin-bottom: 11px; }
-  .setting-check input { accent-color: var(--accent-strong); margin-top: 2px; }
-  .info-box { border: 1px solid var(--line-soft); background: #0f141d; border-radius: 8px; padding: 10px 11px; color: var(--muted); font-size: 10.5px; line-height: 1.55; }
-  .field { margin-bottom: 12px; }
-  .textarea { min-height: 82px; font-size: 11px; }
+  .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+  .settings-card { border: 1px solid #eef0f4; background: #fff; border-radius: 16px; padding: 19px; }
+  .settings-card h3 { margin: 0 0 16px; font-size: 12px; color: #454c57; letter-spacing: .01em; font-weight: 550; }
+  .setting-check { display: flex; align-items: flex-start; gap: 9px; color: #767e8a; font-size: 12px; line-height: 1.5; margin-bottom: 13px; }
+  .setting-check input { accent-color: var(--accent); margin-top: 2px; }
+  .info-box { border: 1px solid #eef0f4; background: #f8f9fb; border-radius: 11px; padding: 11px 12px; color: #8b929e; font-size: 10.5px; line-height: 1.6; }
+  .field { margin-bottom: 13px; }
+  .textarea { min-height: 82px; font-size: 10.5px; }
 </style>

@@ -116,12 +116,51 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .visible(false)
         .build()?;
 
+    apply_light_caption(&window);
     attach_close_behavior(&window);
     let _ = window.show();
     let _ = window.set_focus();
     hide_panel(app);
     Ok(window)
 }
+
+#[cfg(windows)]
+fn apply_light_caption(window: &WebviewWindow) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DwmSetWindowAttribute,
+    };
+
+    let Ok(hwnd) = window.hwnd() else {
+        return;
+    };
+    let hwnd = hwnd.0 as *mut core::ffi::c_void;
+    let caption: u32 = 0x00F8F5F4;
+    let text: u32 = 0x003B3430;
+    let border: u32 = 0x00ECE7E4;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CAPTION_COLOR as u32,
+            &caption as *const u32 as *const core::ffi::c_void,
+            4,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_TEXT_COLOR as u32,
+            &text as *const u32 as *const core::ffi::c_void,
+            4,
+        );
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_BORDER_COLOR as u32,
+            &border as *const u32 as *const core::ffi::c_void,
+            4,
+        );
+    }
+}
+
+#[cfg(not(windows))]
+fn apply_light_caption(_window: &WebviewWindow) {}
 
 pub fn toggle_panel(app: &AppHandle) {
     if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
