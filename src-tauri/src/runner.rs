@@ -5,7 +5,7 @@ use crate::models::{LifecycleEvent, LogBatchEvent, LogLine, RunStateEvent, Scrip
 use crate::runtime;
 use crate::settings;
 use crate::state::AppState;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -357,22 +357,6 @@ pub(crate) fn snapshot_processes() -> Vec<(u32, u32, String)> {
 }
 
 #[cfg(windows)]
-fn list_processes() -> Vec<(u32, u32, String, String)> {
-    snapshot_processes()
-        .into_iter()
-        .map(|(pid, parent, exe)| {
-            let command_line = process_command_line(pid).unwrap_or_default();
-            (pid, parent, exe, command_line)
-        })
-        .collect()
-}
-
-#[cfg(not(windows))]
-fn list_processes() -> Vec<(u32, u32, String, String)> {
-    Vec::new()
-}
-
-#[cfg(windows)]
 pub(crate) fn process_create_time_ms(pid: u32) -> Option<i64> {
     use std::mem::zeroed;
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
@@ -558,7 +542,13 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
             let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
             db::list_scripts(&conn)?
         };
-        let processes = list_processes();
+        let processes = snapshot_processes()
+            .into_iter()
+            .map(|(pid, parent, exe)| {
+                let normalized = normalized_match(&exe);
+                (pid, parent, exe, normalized)
+            })
+            .collect::<Vec<_>>();
         if processes.is_empty() {
             return Ok(0);
         }
@@ -577,6 +567,7 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
         };
 
         let current_pid = std::process::id();
+        let mut command_lines: HashMap<u32, String> = HashMap::new();
         let mut adopted = 0usize;
         for script in scripts {
             if managed_scripts.contains(&script.id) {
@@ -597,15 +588,21 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
             }
 
             let mut pids = Vec::new();
-            for (pid, _parent, exe, command_line) in &processes {
+            for (pid, _parent, exe, normalized_exe) in &processes {
                 if *pid == current_pid || managed_pids.contains(pid) {
                     continue;
                 }
                 if pattern.is_none() && !executable_allowed(&script, exe) {
                     continue;
                 }
-                let haystack = normalized_match(&format!("{exe} {command_line}"));
-                if haystack.contains(&needle) {
+                if normalized_exe.contains(&needle) {
+                    pids.push(*pid);
+                    continue;
+                }
+                let command_line = command_lines.entry(*pid).or_insert_with(|| {
+                    normalized_match(&process_command_line(*pid).unwrap_or_default())
+                });
+                if command_line.contains(&needle) {
                     pids.push(*pid);
                 }
             }

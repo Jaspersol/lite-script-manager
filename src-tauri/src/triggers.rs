@@ -126,11 +126,18 @@ fn enrich(meta: &mut ProcessMeta) {
     }
 }
 
-fn process_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str) -> bool {
+fn identity_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str) -> bool {
     if !config.name.trim().is_empty() && lower(&config.name) != lower(&meta.name) {
         return false;
     }
     if !config.parent.trim().is_empty() && lower(&config.parent) != lower(parent_name) {
+        return false;
+    }
+    true
+}
+
+fn process_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str) -> bool {
+    if !identity_matches(config, meta, parent_name) {
         return false;
     }
     if config.path.trim().is_empty() && config.command.trim().is_empty() {
@@ -170,15 +177,38 @@ fn condition_exit(metric: f64, condition: &Condition) -> bool {
     }
 }
 
-fn process_pids(config: &TriggerConfig, snapshot: &HashMap<u32, ProcessMeta>) -> Vec<u32> {
+fn process_pids(config: &TriggerConfig, snapshot: &mut HashMap<u32, ProcessMeta>) -> Vec<u32> {
+    let needs_path = !config.path.trim().is_empty() || !config.command.trim().is_empty();
+    let mut candidates = Vec::new();
+    for (pid, meta) in snapshot.iter() {
+        let parent = snapshot
+            .get(&meta.parent)
+            .map(|value| value.name.as_str())
+            .unwrap_or("");
+        if identity_matches(config, meta, parent) {
+            candidates.push(*pid);
+        }
+    }
+    if needs_path {
+        for pid in &candidates {
+            if let Some(meta) = snapshot.get_mut(pid)
+                && meta.path.is_none()
+            {
+                enrich(meta);
+            }
+        }
+    }
     let mut values = Vec::new();
-    for (pid, meta) in snapshot {
+    for pid in candidates {
+        let Some(meta) = snapshot.get(&pid) else {
+            continue;
+        };
         let parent = snapshot
             .get(&meta.parent)
             .map(|value| value.name.as_str())
             .unwrap_or("");
         if process_matches(config, meta, parent) {
-            values.push(*pid);
+            values.push(pid);
         }
     }
     values
@@ -188,7 +218,7 @@ fn resource_value(
     condition: &Condition,
     config: &TriggerConfig,
     system: &SystemMetrics,
-    snapshot: &HashMap<u32, ProcessMeta>,
+    snapshot: &mut HashMap<u32, ProcessMeta>,
     cpu_history: &mut CpuHistory,
 ) -> Option<f64> {
     match condition.metric.as_str() {
@@ -403,7 +433,7 @@ fn fire_process_matches(
     app: &AppHandle,
     triggers: &[Trigger],
     event_type: &str,
-    current: &HashMap<u32, ProcessMeta>,
+    current: &mut HashMap<u32, ProcessMeta>,
     previous: &HashMap<u32, ProcessMeta>,
 ) {
     let ids = if event_type == "process_started" {
@@ -431,7 +461,8 @@ fn fire_process_matches(
         let parent = current
             .get(&meta.parent)
             .map(|value| value.name.as_str())
-            .unwrap_or("");
+            .unwrap_or("")
+            .to_string();
         for trigger in triggers {
             if trigger.event_type != event_type {
                 continue;
@@ -442,13 +473,20 @@ fn fire_process_matches(
             {
                 enrich(&mut meta);
             }
-            if process_matches(&config, &meta, parent) {
+            if process_matches(&config, &meta, &parent) {
                 if let Err(error) =
                     fire_trigger(app, trigger, &format!("{event_type}:{}:{}", meta.name, pid))
                 {
                     logging::app_log("ERROR", &format!("触发器执行失败: {error}"));
                 }
             }
+        }
+        if event_type == "process_started"
+            && meta.path.is_some()
+            && let Some(live) = current.get_mut(&pid)
+            && live.path.is_none()
+        {
+            live.path = meta.path;
         }
     }
 }
@@ -561,8 +599,14 @@ fn monitor_loop(app: AppHandle) {
                     }
                 }
                 if let Some(previous) = previous.as_ref() {
-                    fire_process_matches(&app, &triggers, "process_started", &current, previous);
-                    fire_process_matches(&app, &triggers, "process_exited", &current, previous);
+                    fire_process_matches(
+                        &app,
+                        &triggers,
+                        "process_started",
+                        &mut current,
+                        previous,
+                    );
+                    fire_process_matches(&app, &triggers, "process_exited", &mut current, previous);
                     // Keep cached command lines for processes that are still alive.
                     for (pid, meta) in &mut current {
                         if let Some(old) = previous.get(pid) {
@@ -586,8 +630,8 @@ fn monitor_loop(app: AppHandle) {
                 previous = snapshot;
                 continue;
             }
-            let empty = HashMap::new();
-            let processes = snapshot.as_ref().unwrap_or(&empty);
+            let mut empty = HashMap::new();
+            let processes = snapshot.as_mut().unwrap_or(&mut empty);
             let system = metrics::system_metrics(&mut sampler);
             let now = db::now_ms();
             for trigger in resource_triggers {

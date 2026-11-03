@@ -3,13 +3,33 @@ use crate::settings;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 static APP_LOG: OnceLock<PathBuf> = OnceLock::new();
+static APP_LOG_FILE: Mutex<Option<AppLogFile>> = Mutex::new(None);
+const APP_LOG_LIMIT: u64 = 5 * 1024 * 1024;
+
+struct AppLogFile {
+    file: std::fs::File,
+    written: u64,
+}
+
+fn open_app_log(path: &Path) -> Option<AppLogFile> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .ok()?;
+    let written = file.metadata().map(|value| value.len()).unwrap_or(0);
+    Some(AppLogFile { file, written })
+}
 
 pub fn init_app_log(data_dir: &Path) {
     let path = data_dir.join("logs").join("app.log");
@@ -29,22 +49,28 @@ pub fn app_log(level: &str, message: &str) {
         eprintln!("[{level}] {message}");
         return;
     };
-    if std::fs::metadata(path)
-        .map(|value| value.len())
-        .unwrap_or(0)
-        > 5 * 1024 * 1024
+    let Ok(mut guard) = APP_LOG_FILE.lock() else {
+        return;
+    };
+    if guard.is_none() {
+        *guard = open_app_log(path);
+    }
+    if guard
+        .as_ref()
+        .is_some_and(|log| log.written > APP_LOG_LIMIT)
     {
+        *guard = None;
         let rotated = path.with_extension("log.1");
         let _ = std::fs::remove_file(&rotated);
         let _ = std::fs::rename(path, rotated);
+        *guard = open_app_log(path);
     }
-    if let Ok(mut file) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+    let line = format!("[{timestamp}] [{level}] {message}\n");
+    if let Some(log) = guard.as_mut()
+        && log.file.write_all(line.as_bytes()).is_ok()
     {
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
-        let _ = writeln!(file, "[{timestamp}] [{level}] {message}");
+        log.written = log.written.saturating_add(line.len() as u64);
     }
 }
 
@@ -111,9 +137,18 @@ impl LogRing {
 }
 
 pub fn sha256_file(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("读取脚本文件失败: {e}"))?;
+    let mut file = std::fs::File::open(path).map_err(|e| format!("读取脚本文件失败: {e}"))?;
     let mut hasher = Sha256::new();
-    hasher.update(&bytes);
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|e| format!("读取脚本文件失败: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
     Ok(format!("{:x}", hasher.finalize()))
 }
 

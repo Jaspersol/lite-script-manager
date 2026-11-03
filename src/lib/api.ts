@@ -32,7 +32,6 @@ export const api = {
   stopScript: (id: string) => invoke<void>("stop_script", { id }),
   stopAllScripts: () => invoke<void>("stop_all_scripts"),
   adoptExternalRuns: () => invoke<number>("adopt_external_runs"),
-  setUiVisible: (visible: boolean) => invoke<void>("set_ui_visible", { visible }),
   setLogStreaming: (visible: boolean) => invoke<void>("set_log_streaming", { visible }),
   closePanel: () => invoke<void>("close_panel"),
   closeMain: () => invoke<void>("close_main"),

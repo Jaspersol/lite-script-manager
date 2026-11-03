@@ -40,13 +40,13 @@
 
   const scriptExtensions = ["py", "js", "mjs", "cjs", "sh", "bash", "pl", "php", "R", "r", "lua", "bat", "cmd", "ps1", "vbs", "vbe", "wsf", "ahk", "au3"];
 
-  const filteredScripts = $derived(
-    scripts.filter((script) => {
-      const term = search.trim().toLowerCase();
-      if (!term) return true;
-      return `${script.name} ${script.path} ${script.runtime_id}`.toLowerCase().includes(term);
-    }),
-  );
+  const filteredScripts = $derived.by(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return scripts;
+    return scripts.filter((script) =>
+      `${script.name} ${script.path} ${script.runtime_id}`.toLowerCase().includes(term),
+    );
+  });
 
   const runningCount = $derived(scripts.filter((s) => s.status === "running" || s.status === "starting").length);
   const tabTitle = $derived({
@@ -66,8 +66,10 @@
     settings: "应用、窗口、日志、监控与安全设置。",
   }[activeTab]);
 
+  const runtimeNames = $derived(new Map(catalog.map((item) => [item.id, item.name] as const)));
+
   function runtimeName(id: string): string {
-    return catalog.find((item) => item.id === id)?.name ?? id;
+    return runtimeNames.get(id) ?? id;
   }
 
   function displayPath(path: string): string {
@@ -337,12 +339,9 @@
     loadCatalog();
     refreshScripts(true).finally(() => { loading = false; });
     adoptExternalRuns();
-    api.setUiVisible(true).catch(() => {});
     api.getSettings().then((settings: Settings) => {
       if (settings.first_run_done !== "true") firstRun = true;
     }).catch(() => {});
-    const onVisibility = () => { api.setUiVisible(!document.hidden).catch(() => {}); };
-    document.addEventListener("visibilitychange", onVisibility);
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     (async () => {
@@ -371,8 +370,6 @@
     })();
     return () => {
       disposed = true;
-      api.setUiVisible(false).catch(() => {});
-      document.removeEventListener("visibilitychange", onVisibility);
       unlisteners.forEach((fn) => fn());
     };
   });

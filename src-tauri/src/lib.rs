@@ -40,20 +40,45 @@ fn emit_changed(app: &AppHandle) {
     let _ = app.emit("scripts-changed", ());
 }
 
+const LOG_TAIL_CHUNK: usize = 64 * 1024;
+const LOG_TAIL_MAX_BYTES: usize = 2 * 1024 * 1024;
+
 fn read_log_tail(path: &str, max_lines: usize) -> Result<Vec<String>, String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("读取日志失败: {e}"))?;
     let length = file.metadata().map(|value| value.len()).unwrap_or(0);
-    let start = length.saturating_sub(2 * 1024 * 1024);
-    if start > 0 {
-        file.seek(SeekFrom::Start(start))
+    let wanted = max_lines.max(1);
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut position = length;
+    let mut newlines = 0usize;
+    // Read backwards in chunks so a small tail does not pull the whole
+    // (potentially multi-megabyte) file into memory.
+    while position > 0 && buffer.len() < LOG_TAIL_MAX_BYTES {
+        let read = LOG_TAIL_CHUNK
+            .min(position as usize)
+            .min(LOG_TAIL_MAX_BYTES - buffer.len());
+        if read == 0 {
+            break;
+        }
+        position -= read as u64;
+        let mut chunk = vec![0u8; read];
+        file.seek(SeekFrom::Start(position))
             .map_err(|e| format!("读取日志失败: {e}"))?;
+        file.read_exact(&mut chunk)
+            .map_err(|e| format!("读取日志失败: {e}"))?;
+        newlines += chunk.iter().filter(|value| **value == b'\n').count();
+        chunk.extend_from_slice(&buffer);
+        buffer = chunk;
+        if newlines > wanted {
+            break;
+        }
     }
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| format!("读取日志失败: {e}"))?;
-    let text = logging::decode_output(&bytes);
-    let lines = text.lines().collect::<Vec<_>>();
-    let start = lines.len().saturating_sub(max_lines.max(1));
+    let text = logging::decode_output(&buffer);
+    let mut lines = text.lines().collect::<Vec<_>>();
+    if position > 0 && !lines.is_empty() {
+        // The chunk boundary can split a line; drop the partial head.
+        lines.remove(0);
+    }
+    let start = lines.len().saturating_sub(wanted);
     Ok(lines[start..]
         .iter()
         .map(|line| line.trim_end_matches('\r').to_string())
@@ -338,13 +363,6 @@ async fn adopt_external_runs(app: AppHandle) -> Result<usize, String> {
 }
 
 #[tauri::command]
-fn set_ui_visible(state: State<AppState>, visible: bool) {
-    state
-        .ui_visible
-        .store(visible, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[tauri::command]
 fn set_log_streaming(state: State<AppState>, visible: bool) {
     state
         .log_streaming
@@ -362,8 +380,8 @@ fn get_active_log(state: State<AppState>, run_id: String) -> Vec<models::LogLine
 }
 
 #[tauri::command]
-fn get_run_log(
-    state: State<AppState>,
+async fn get_run_log(
+    state: State<'_, AppState>,
     run_id: String,
     max_lines: usize,
 ) -> Result<Vec<String>, String> {
@@ -384,10 +402,12 @@ fn get_run_log(
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         db::get_run_log_path(&conn, &run_id)?
     };
-    match path {
-        Some(path) if !path.is_empty() => read_log_tail(&path, max_lines),
-        _ => Ok(Vec::new()),
-    }
+    let Some(path) = path.filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    tauri::async_runtime::spawn_blocking(move || read_log_tail(&path, max_lines))
+        .await
+        .map_err(|e| format!("读取日志任务失败: {e}"))?
 }
 
 #[tauri::command]
@@ -871,7 +891,6 @@ pub fn run() {
             stop_script,
             stop_all_scripts,
             adopt_external_runs,
-            set_ui_visible,
             set_log_streaming,
             get_active_log,
             get_run_log,

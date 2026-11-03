@@ -23,6 +23,7 @@
   let selected: RunRecord | null = $state(null);
   let logLines: string[] = $state([]);
   let logLoading = $state(false);
+  let pageSize = $state(200);
 
   function sourceLabel(value: string): string {
     return {
@@ -53,7 +54,7 @@
         scriptId: scriptFilter || null,
         status: statusFilter || null,
         source: sourceFilter || null,
-        limit: 1000,
+        limit: pageSize,
       });
       if (selected) {
         selected = runs.find((run) => run.id === selected?.id) ?? selected;
@@ -96,6 +97,7 @@
       const count = await api.clearRuns(null);
       selected = null;
       logLines = [];
+      pageSize = 200;
       await api.setLogStreaming(false);
       await load();
       notify(`已清理 ${count} 条历史记录`);
@@ -107,6 +109,12 @@
   function setFilter() {
     selected = null;
     logLines = [];
+    pageSize = 200;
+    load();
+  }
+
+  function loadMore() {
+    pageSize += 200;
     load();
   }
 
@@ -197,6 +205,9 @@
             </button>
           {/each}
         </div>
+        {#if runs.length >= pageSize}
+          <button class="btn load-more" onclick={loadMore}>加载更多</button>
+        {/if}
       {/if}
     </div>
 
@@ -290,6 +301,7 @@
   .detail-placeholder p { max-width: 210px; line-height: 1.6; }
   .empty-icon { color: #bdc5d0; display: grid; place-items: center; }
   .empty-state.small { min-height: 240px; }
+  .load-more { width: 100%; margin-top: 10px; justify-content: center; }
   @media (max-width: 1100px) {
     .history-layout { grid-template-columns: 1fr; }
   }

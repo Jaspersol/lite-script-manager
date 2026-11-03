@@ -177,18 +177,27 @@ fn add_column_if_missing(
 pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path,
-                    process_match, stop_timeout_sec, timeout_sec, stop_mode, max_instances,
-                    instance_policy, success_codes, content_hash, sort_order, enabled,
-                    created_at, updated_at
-             FROM scripts ORDER BY sort_order ASC, created_at ASC",
+            "SELECT s.id, s.name, s.path, s.runtime_id, s.args_json, s.cwd, s.env_json,
+                    s.interpreter_path, s.process_match, s.stop_timeout_sec, s.timeout_sec,
+                    s.stop_mode, s.max_instances, s.instance_policy, s.success_codes,
+                    s.content_hash, s.sort_order, s.enabled, s.created_at, s.updated_at,
+                    r.id, r.status, r.error, r.exit_code
+             FROM scripts s
+             LEFT JOIN runs r ON r.id = (
+                 SELECT id FROM runs WHERE script_id = s.id ORDER BY started_at DESC LIMIT 1
+             )
+             ORDER BY s.sort_order ASC, s.created_at ASC",
         )
         .map_err(|e| e.to_string())?;
     let rows = statement
         .query_map([], |row| {
             let args_json: String = row.get(4)?;
             let env_json: String = row.get(6)?;
-            Ok(Script {
+            let last_run_id: Option<String> = row.get(20)?;
+            let last_status: Option<String> = row.get(21)?;
+            let last_error: Option<String> = row.get(22)?;
+            let last_exit: Option<i32> = row.get(23)?;
+            let mut script = Script {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 path: row.get(2)?,
@@ -212,44 +221,27 @@ pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
                 status: "stopped".into(),
                 last_error: None,
                 last_run_id: None,
-            })
+            };
+            if let Some(run_id) = last_run_id {
+                script.last_run_id = Some(run_id);
+                let status = last_status.unwrap_or_default();
+                script.status = match status.as_str() {
+                    "running" | "starting" | "stopping" | "queued" => status.clone(),
+                    "failed" => "failed".into(),
+                    _ => "stopped".into(),
+                };
+                script.last_error = last_error.or_else(|| {
+                    if status == "failed" {
+                        Some(format!("上次运行退出码 {}", last_exit.unwrap_or(-1)))
+                    } else {
+                        None
+                    }
+                });
+            }
+            Ok(script)
         })
         .map_err(|e| e.to_string())?;
-
-    let mut scripts = rows.filter_map(|r| r.ok()).collect::<Vec<_>>();
-    for script in &mut scripts {
-        let last = conn
-            .query_row(
-                "SELECT id, status, error, exit_code FROM runs WHERE script_id=?1 ORDER BY started_at DESC LIMIT 1",
-                params![script.id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
-                        row.get::<_, Option<i32>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|e| e.to_string())?;
-        if let Some((run_id, status, error, exit_code)) = last {
-            script.last_run_id = Some(run_id);
-            script.status = match status.as_str() {
-                "running" | "starting" | "stopping" | "queued" => status.clone(),
-                "failed" => "failed".into(),
-                _ => "stopped".into(),
-            };
-            script.last_error = error.or_else(|| {
-                if status == "failed" {
-                    Some(format!("上次运行退出码 {}", exit_code.unwrap_or(-1)))
-                } else {
-                    None
-                }
-            });
-        }
-    }
-    Ok(scripts)
+    Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 pub fn get_script(conn: &Connection, id: &str) -> Result<Option<Script>, String> {

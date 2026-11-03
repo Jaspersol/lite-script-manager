@@ -62,8 +62,8 @@ fn attach_dismiss_on_blur(window: &WebviewWindow) {
             let window = window_for_event.clone();
             // Focus flickers while the window is being shown; only dismiss once
             // it is still unfocused after the debounce.
-            std::thread::spawn(move || {
-                std::thread::sleep(BLUR_DEBOUNCE);
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(BLUR_DEBOUNCE).await;
                 if window.is_focused().unwrap_or(false) || !window.is_visible().unwrap_or(false) {
                     return;
                 }
