@@ -122,7 +122,8 @@ button, input, textarea, select, summary { -webkit-tap-highlight-color: transpar
   animation: backdrop-in var(--dur-2) var(--ease) both;
 }
 .modal {
-  width: min(560px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto;
+  width: min(560px, 100%); max-height: min(760px, calc(100vh - 48px));
+  display: flex; flex-direction: column; overflow: hidden;
   background: #fff; border: 1px solid var(--line); border-radius: 18px; box-shadow: var(--shadow);
   animation: modal-in var(--dur-3) var(--ease-out) both;
 }
@@ -132,14 +133,14 @@ button, input, textarea, select, summary { -webkit-tap-highlight-color: transpar
   to { opacity: 1; transform: none; }
 }
 .modal-head {
-  position: sticky; top: 0; z-index: 2;
+  flex: 0 0 auto;
   display: flex; align-items: center; justify-content: space-between;
   padding: 19px 24px 15px; border-bottom: 1px solid var(--line-soft); background: #fff;
 }
 .modal-title { font-size: 15px; font-weight: 600; color: #2c3138; letter-spacing: -.1px; }
-.modal-body { padding: 20px 24px; }
+.modal-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px 24px; }
 .modal-foot {
-  position: sticky; bottom: 0; z-index: 2;
+  flex: 0 0 auto;
   display: flex; justify-content: flex-end; gap: 8px;
   padding: 14px 24px 18px; border-top: 1px solid var(--line-soft); background: #fff;
 }

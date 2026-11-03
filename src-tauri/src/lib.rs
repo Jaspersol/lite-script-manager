@@ -79,8 +79,7 @@ fn read_log_tail(path: &str, max_lines: usize) -> Result<Vec<String>, String> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut position = length;
     let mut newlines = 0usize;
-    // Read backwards in chunks so a small tail does not pull the whole
-    // (potentially multi-megabyte) file into memory.
+    // Read backward in chunks to avoid loading the whole file.
     while position > 0 && buffer.len() < LOG_TAIL_MAX_BYTES {
         let read = LOG_TAIL_CHUNK
             .min(position as usize)
@@ -104,7 +103,7 @@ fn read_log_tail(path: &str, max_lines: usize) -> Result<Vec<String>, String> {
     let text = logging::decode_output(&buffer);
     let mut lines = text.lines().collect::<Vec<_>>();
     if position > 0 && !lines.is_empty() {
-        // The chunk boundary can split a line; drop the partial head.
+        // Drop the partial first line at a chunk boundary.
         lines.remove(0);
     }
     let start = lines.len().saturating_sub(wanted);
@@ -174,7 +173,7 @@ fn create_script_from_path(
     let script = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         if db::path_exists(&conn, &path_key)? {
-            return Err("这个脚本已经在列表中".to_string());
+            return Err("脚本已在列表中".to_string());
         }
         let sort_order = db::max_sort_order(&conn)? + 1;
         let stop_timeout = settings::get_i64(&conn, "default_stop_timeout", 3).clamp(1, 60);
@@ -764,7 +763,7 @@ fn close_panel(app: AppHandle) {
 fn show_main(app: AppHandle) -> Result<(), String> {
     windows::ensure_main(&app)
         .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("打开主窗口失败: {e}"))
 }
 
 #[tauri::command]

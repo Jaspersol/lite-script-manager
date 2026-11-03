@@ -241,7 +241,6 @@ fn registry_candidates(spec: &RuntimeSpec) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let hives = [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER];
 
-    // App Paths is the standard registry location for executables registered by installers.
     for hive in hives {
         let root = RegKey::predef(hive);
         for exe in spec.executables {
@@ -399,7 +398,6 @@ fn common_patterns(spec: &RuntimeSpec) -> Vec<&'static str> {
 fn candidates_for(spec: &RuntimeSpec) -> Vec<PathBuf> {
     let mut paths = Vec::new();
 
-    // PATH entries first; this preserves the user's active environment.
     for name in spec.executables {
         if let Ok(path) = which::which(name)
             && !is_windows_store_alias(&path, spec)
@@ -414,8 +412,6 @@ fn candidates_for(spec: &RuntimeSpec) -> Vec<PathBuf> {
         }
     }
 
-    // Registry entries and typical installer directories cover processes launched
-    // from a GUI where the user PATH may not include the runtime.
     for path in registry_candidates(spec) {
         push_candidate(&mut paths, path);
     }

@@ -192,7 +192,7 @@
 
   async function createNewScript() {
     if (!newName.trim()) {
-      showToast("请填写脚本名称", "error");
+      showToast("脚本名称不能为空", "error");
       return;
     }
     try {
@@ -713,8 +713,8 @@
     padding: 4px 32px 32px; animation: page-in var(--dur-2) var(--ease) both;
   }
   @keyframes page-in {
-    from { opacity: 0; transform: translateY(4px); }
-    to { opacity: 1; transform: none; }
+    from { opacity: 0; }
+    to { opacity: 1; }
   }
   .toolbar { display: flex; align-items: center; gap: 16px; margin-bottom: 16px; }
   .search-wrap { position: relative; width: min(360px, 100%); }

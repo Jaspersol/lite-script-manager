@@ -89,11 +89,11 @@
   async function save() {
     if (!edit) return;
     if (!edit.name.trim()) {
-      notify("请填写计划名称", "error");
+      notify("计划名称不能为空", "error");
       return;
     }
     if (!edit.script_id) {
-      notify("请选择脚本", "error");
+      notify("请选择计划关联的脚本", "error");
       return;
     }
     try {

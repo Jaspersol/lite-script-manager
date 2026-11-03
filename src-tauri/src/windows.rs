@@ -9,9 +9,8 @@ use tauri::{
     AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
-/// Set when the panel is dismissed by losing focus. A tray click that lands
-/// within this window is the same click that dismissed the panel, so it must
-/// not reopen it.
+/// Timestamp of a panel dismissal caused by focus loss.
+/// Suppresses the tray click that caused the dismissal.
 static PANEL_BLUR_AT: Mutex<Option<Instant>> = Mutex::new(None);
 const PANEL_REOPEN_GUARD: Duration = Duration::from_millis(300);
 const BLUR_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -60,8 +59,7 @@ fn attach_dismiss_on_blur(window: &WebviewWindow) {
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::Focused(false) = event {
             let window = window_for_event.clone();
-            // Focus flickers while the window is being shown; only dismiss once
-            // it is still unfocused after the debounce.
+            // Ignore transient focus loss while the panel is being shown.
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(BLUR_DEBOUNCE).await;
                 if window.is_focused().unwrap_or(false) || !window.is_visible().unwrap_or(false) {
@@ -245,9 +243,7 @@ fn panel_position(app: &AppHandle, window: &WebviewWindow) -> PhysicalPosition<i
     };
     let scale = monitor.scale_factor();
     let work = monitor.work_area();
-    // Outer size matters: an undecorated Windows window still carries invisible
-    // DWM frame margins, so sizing off the logical panel width would leave the
-    // card flush against the screen edge.
+    // Use the outer size so DWM frame margins are included.
     let (width, height) = window
         .outer_size()
         .map(|size| (size.width as i32, size.height as i32))

@@ -262,7 +262,7 @@ fn resume_process(pid: u32) -> Result<(), String> {
         if resumed {
             Ok(())
         } else {
-            Err("无法恢复挂起的子进程线程".to_string())
+            Err("恢复挂起的子进程线程失败".to_string())
         }
     }
 }
@@ -1267,7 +1267,9 @@ pub fn start_with(
         logging::app_log("ERROR", &format!("启动 {} 失败: {e}", script.name));
         format!("启动进程失败: {e}")
     })?;
-    let pid = child.id().ok_or_else(|| "无法获取子进程 PID".to_string())?;
+    let pid = child
+        .id()
+        .ok_or_else(|| "获取子进程 PID 失败".to_string())?;
 
     let guard = match JobHandle::attach(pid) {
         Ok(guard) => Arc::new(guard),

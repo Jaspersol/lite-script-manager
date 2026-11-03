@@ -152,7 +152,7 @@ pub fn sha256_file(path: &Path) -> Result<String, String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Empty `allowed_roots` means all local paths are allowed.
+/// An empty root list allows every local path.
 pub fn path_allowed(path: &Path, allowed_roots: &str) -> bool {
     let roots = allowed_roots
         .split([';', '\n'])
@@ -180,8 +180,7 @@ pub fn prune_logs(conn: &Connection, data_dir: &Path) -> Result<(), String> {
     prune_log_files(data_dir, retention_days, max_bytes)
 }
 
-/// Runs at most once per [`AUTO_PRUNE_INTERVAL`]. Reads the limits under a
-/// short-lived lock and walks the log directory with the database unlocked.
+/// Runs at most once per [`AUTO_PRUNE_INTERVAL`].
 pub fn auto_prune_logs(db: &Mutex<Connection>, data_dir: &Path) {
     let due = LAST_AUTO_PRUNE
         .lock()

@@ -115,7 +115,6 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
     )
     .map_err(|e| format!("初始化数据库失败: {e}"))?;
 
-    // Add columns introduced after the first schema version.
     for (column, definition) in [
         ("interpreter_path", "TEXT"),
         ("process_match", "TEXT"),
@@ -141,7 +140,6 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
         add_column_if_missing(&conn, "runs", column, definition)?;
     }
 
-    // Any run left as running from a previous process is no longer controllable.
     let _ = conn.execute(
         "UPDATE runs SET status='failed', error='应用上次退出时运行状态未正常结束', ended_at=?1
          WHERE status IN ('running','stopping','starting','queued')",
@@ -163,13 +161,13 @@ fn add_column_if_missing(
             params![table, column],
             |row| row.get(0),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     if exists == 0 {
         conn.execute(
             &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
             [],
         )
-        .map_err(|e| format!("升级数据库字段失败 ({column}): {e}"))?;
+        .map_err(|e| format!("升级数据库字段 {column} 失败: {e}"))?;
     }
     Ok(())
 }
@@ -237,12 +235,14 @@ fn script_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Script> {
 
 pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
     let sql = format!("{SCRIPT_SELECT} ORDER BY s.sort_order ASC, s.created_at ASC");
-    let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     let rows = statement
         .query_map([], script_from_row)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn get_script(conn: &Connection, id: &str) -> Result<Option<Script>, String> {
@@ -252,7 +252,7 @@ pub fn get_script(conn: &Connection, id: &str) -> Result<Option<Script>, String>
         script_from_row,
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
@@ -322,28 +322,30 @@ pub fn set_script_hash(conn: &Connection, id: &str, hash: Option<&str>) -> Resul
         "UPDATE scripts SET content_hash=?2, updated_at=?3 WHERE id=?1",
         params![id, hash, now_ms()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
 pub fn delete_script(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM schedules WHERE script_id=?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     conn.execute("DELETE FROM scripts WHERE id=?1", params![id])
         .map_err(|e| format!("删除脚本失败: {e}"))?;
     Ok(())
 }
 
 pub fn reorder_scripts(conn: &mut Connection, ids: &[String]) -> Result<(), String> {
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     for (index, id) in ids.iter().enumerate() {
         tx.execute(
             "UPDATE scripts SET sort_order=?2, updated_at=?3 WHERE id=?1",
             params![id, index as i64, now_ms()],
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     }
-    tx.commit().map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -353,7 +355,7 @@ pub fn max_sort_order(conn: &Connection) -> Result<i64, String> {
         [],
         |row| row.get(0),
     )
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn path_exists(conn: &Connection, path: &str) -> Result<bool, String> {
@@ -363,7 +365,7 @@ pub fn path_exists(conn: &Connection, path: &str) -> Result<bool, String> {
             params![path],
             |row| row.get(0),
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(count > 0)
 }
 
@@ -424,7 +426,7 @@ pub fn finish_run(
             log_bytes
         ],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -435,7 +437,7 @@ pub fn get_run_log_path(conn: &Connection, run_id: &str) -> Result<Option<String
         |row| row.get(0),
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 fn run_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RunRecord> {
@@ -480,15 +482,15 @@ pub fn list_runs(
                AND (?3 IS NULL OR r.trigger_source=?3)
              ORDER BY r.started_at DESC LIMIT ?4"
         ))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     let rows = statement
         .query_map(
             params![script_id, status, source, limit.clamp(1, 5000)],
             run_record,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<RunRecord>, String> {
@@ -498,7 +500,7 @@ pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<RunRecord>, Str
         run_record,
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn clear_runs(conn: &Connection, before_ms: Option<i64>) -> Result<usize, String> {
@@ -507,7 +509,7 @@ pub fn clear_runs(conn: &Connection, before_ms: Option<i64>) -> Result<usize, St
     } else {
         conn.execute("DELETE FROM runs", [])
     }
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(changed)
 }
 
@@ -545,12 +547,12 @@ fn schedule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
 pub fn list_schedules(conn: &Connection) -> Result<Vec<Schedule>, String> {
     let mut statement = conn
         .prepare(&format!("{SCHEDULE_SELECT} ORDER BY created_at ASC"))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     let rows = statement
         .query_map([], schedule_from_row)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn get_schedule(conn: &Connection, id: &str) -> Result<Option<Schedule>, String> {
@@ -560,7 +562,7 @@ pub fn get_schedule(conn: &Connection, id: &str) -> Result<Option<Schedule>, Str
         schedule_from_row,
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn insert_schedule(conn: &Connection, schedule: &Schedule) -> Result<(), String> {
@@ -621,7 +623,7 @@ pub fn set_schedule_enabled(conn: &Connection, id: &str, enabled: bool) -> Resul
         "UPDATE schedules SET enabled=?2, updated_at=?3 WHERE id=?1",
         params![id, if enabled { 1 } else { 0 }, now_ms()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -630,7 +632,7 @@ pub fn set_schedule_next(conn: &Connection, id: &str, next: Option<i64>) -> Resu
         "UPDATE schedules SET next_run_at=?2, updated_at=?3 WHERE id=?1",
         params![id, next, now_ms()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -646,7 +648,7 @@ pub fn mark_schedule_started(
             last_run_id=?3, next_run_at=?4, updated_at=?5 WHERE id=?1",
         params![id, started_at, run_id, next, now_ms()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -660,13 +662,13 @@ pub fn mark_schedule_result(
         "UPDATE schedules SET last_status=?2, last_error=?3, updated_at=?4 WHERE id=?1",
         params![id, status, error, now_ms()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
 pub fn delete_schedule(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM schedules WHERE id=?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -692,12 +694,12 @@ fn trigger_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trigger> {
 pub fn list_triggers(conn: &Connection) -> Result<Vec<Trigger>, String> {
     let mut statement = conn
         .prepare(&format!("{TRIGGER_SELECT} ORDER BY created_at ASC"))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     let rows = statement
         .query_map([], trigger_from_row)
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn get_trigger(conn: &Connection, id: &str) -> Result<Option<Trigger>, String> {
@@ -707,7 +709,7 @@ pub fn get_trigger(conn: &Connection, id: &str) -> Result<Option<Trigger>, Strin
         trigger_from_row,
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn insert_trigger(conn: &Connection, trigger: &Trigger) -> Result<(), String> {
@@ -757,7 +759,7 @@ pub fn set_trigger_enabled(conn: &Connection, id: &str, enabled: bool) -> Result
         "UPDATE triggers SET enabled=?2, updated_at=?3 WHERE id=?1",
         params![id, if enabled { 1 } else { 0 }, now_ms()],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -766,9 +768,9 @@ pub fn delete_trigger(conn: &Connection, id: &str) -> Result<(), String> {
         "DELETE FROM trigger_events WHERE trigger_id=?1",
         params![id],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     conn.execute("DELETE FROM triggers WHERE id=?1", params![id])
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -783,12 +785,12 @@ pub fn record_trigger_event(
         "INSERT INTO trigger_events (id, trigger_id, fired_at, event, result) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, trigger_id, now_ms(), event, result],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     conn.execute(
         "UPDATE triggers SET last_triggered_at=?2, last_result=?3, updated_at=?2 WHERE id=?1",
         params![trigger_id, now_ms(), result],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -799,7 +801,7 @@ pub fn list_trigger_events(conn: &Connection, limit: i64) -> Result<Vec<TriggerE
              FROM trigger_events e LEFT JOIN triggers t ON t.id=e.trigger_id
              ORDER BY e.fired_at DESC LIMIT ?1",
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     let rows = statement
         .query_map(params![limit.clamp(1, 1000)], |row| {
             Ok(TriggerEvent {
@@ -811,9 +813,9 @@ pub fn list_trigger_events(conn: &Connection, limit: i64) -> Result<Vec<TriggerE
                 result: row.get(5)?,
             })
         })
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
@@ -821,7 +823,7 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), Stri
         "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![key, value],
     )
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -832,18 +834,18 @@ pub fn get_setting(conn: &Connection, key: &str) -> Result<Option<String>, Strin
         |row| row.get(0),
     )
     .optional()
-    .map_err(|e| e.to_string())
+    .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 pub fn get_settings(conn: &Connection) -> Result<HashMap<String, String>, String> {
     let mut statement = conn
         .prepare("SELECT key, value FROM settings")
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     let rows = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
     rows.collect::<rusqlite::Result<HashMap<_, _>>>()
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("数据库操作失败: {e}"))
 }
 
 #[cfg(test)]

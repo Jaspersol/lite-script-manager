@@ -205,9 +205,7 @@ fn handle_due(app: &AppHandle, schedule: &mut Schedule, now: i64) -> Result<(), 
         return Ok(());
     }
 
-    // If the process was suspended or the app was closed, compute how many
-    // wall-clock occurrences were missed. A small grace period avoids treating
-    // scheduler wake-up latency as a missed run.
+    // Collect missed wall-clock runs, ignoring the last two seconds.
     let mut missed = Vec::new();
     let mut cursor = next;
     let mut guard = 0;

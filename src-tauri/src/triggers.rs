@@ -156,9 +156,7 @@ fn process_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str
     true
 }
 
-/// Reads command lines for processes that a path/command trigger could match.
-/// Doing this while every candidate is still alive lets `process_exited`
-/// triggers match too, and the result is cached in the snapshot for later ticks.
+/// Reads command lines for processes that a path/command trigger can match.
 fn enrich_process_triggers(triggers: &[Trigger], snapshot: &mut HashMap<u32, ProcessMeta>) {
     for trigger in triggers {
         if !matches!(
@@ -628,8 +626,7 @@ fn monitor_loop(app: AppHandle) {
                         previous,
                     );
                     fire_process_matches(&app, &triggers, "process_exited", &mut current, previous);
-                    // Reuse previously read command lines without dropping a
-                    // path that was enriched during this tick.
+                    // Reuse cached paths without overwriting paths read this tick.
                     for (pid, meta) in &mut current {
                         if meta.path.is_none()
                             && let Some(old) = previous.get(pid)

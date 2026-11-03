@@ -202,11 +202,11 @@
 
   async function save() {
     if (!name.trim()) {
-      notify("请填写触发器名称", "error");
+      notify("触发器名称不能为空", "error");
       return;
     }
     if (actions.length === 0) {
-      notify("至少需要一个动作", "error");
+      notify("触发器至少需要一个动作", "error");
       return;
     }
     const payload: TriggerEdit = {
