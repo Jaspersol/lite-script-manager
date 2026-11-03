@@ -292,14 +292,14 @@ fn close_main(app: AppHandle) {
 }
 
 #[tauri::command]
-fn show_main(app: AppHandle) -> Result<(), String> {
+async fn show_main(app: AppHandle) -> Result<(), String> {
     windows::ensure_main(&app)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn show_panel(app: AppHandle) -> Result<(), String> {
+async fn show_panel(app: AppHandle) -> Result<(), String> {
     windows::ensure_panel(&app)
         .map(|_| ())
         .map_err(|e| e.to_string())

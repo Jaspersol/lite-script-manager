@@ -86,6 +86,7 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+        hide_panel(app);
         return Ok(window);
     }
 
@@ -100,18 +101,18 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     attach_close_behavior(&window);
     let _ = window.show();
     let _ = window.set_focus();
+    hide_panel(app);
     Ok(window)
 }
 
 pub fn toggle_panel(app: &AppHandle) {
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let _ = main.unminimize();
-        let _ = main.show();
-        let _ = main.set_focus();
-        return;
-    }
     if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
-        let _ = panel.destroy();
+        if panel.is_visible().unwrap_or(false) {
+            let _ = panel.destroy();
+        } else {
+            let _ = panel.show();
+            let _ = panel.set_focus();
+        }
     } else {
         let _ = ensure_panel(app);
     }
@@ -120,6 +121,12 @@ pub fn toggle_panel(app: &AppHandle) {
 pub fn close_panel(app: &AppHandle) {
     if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
         let _ = panel.destroy();
+    }
+}
+
+fn hide_panel(app: &AppHandle) {
+    if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
+        let _ = panel.hide();
     }
 }
 
