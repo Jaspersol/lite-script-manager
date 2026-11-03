@@ -15,32 +15,51 @@ pub fn wake(app: &AppHandle) {
     app.state::<AppState>().scheduler_wake.notify_waiters();
 }
 
-fn schedule_next(schedule: &Schedule, after_ms: i64) -> Result<Option<i64>, String> {
-    match schedule.kind.as_str() {
+pub(crate) fn next_after(
+    kind: &str,
+    expression: &str,
+    timezone: &str,
+    restart_delay_sec: i64,
+    after_ms: i64,
+) -> Result<Option<i64>, String> {
+    match kind {
         "once" => Ok(None),
-        "loop" => Ok(None),
-        "cron" | "interval" => cron::next_run_ms(
-            &schedule.kind,
-            &schedule.expression,
-            &schedule.timezone,
-            after_ms,
-        )
-        .map(Some),
+        "loop" => {
+            let delay = restart_delay_sec.max(0) * 1000;
+            let delay = if delay > 0 {
+                delay
+            } else {
+                cron::parse_interval(expression)?
+            };
+            Ok(Some(after_ms + delay))
+        }
+        "cron" | "interval" => cron::next_run_ms(kind, expression, timezone, after_ms).map(Some),
         other => Err(format!("未知计划类型: {other}")),
     }
 }
 
-fn next_for_schedule(schedule: &Schedule, after_ms: i64) -> Result<Option<i64>, String> {
-    if schedule.kind == "loop" {
-        let delay = schedule.restart_delay_sec.max(0) as i64;
-        let delay = if delay > 0 {
-            delay * 1000
-        } else {
-            cron::parse_interval(&schedule.expression)?
-        };
-        return Ok(Some(after_ms + delay));
+pub(crate) fn initial_next(
+    kind: &str,
+    expression: &str,
+    timezone: &str,
+    restart_delay_sec: i64,
+    after_ms: i64,
+) -> Result<Option<i64>, String> {
+    match kind {
+        "once" => cron::parse_once(expression).map(Some),
+        "loop" => Ok(Some(after_ms)),
+        _ => next_after(kind, expression, timezone, restart_delay_sec, after_ms),
     }
-    schedule_next(schedule, after_ms)
+}
+
+fn next_for_schedule(schedule: &Schedule, after_ms: i64) -> Result<Option<i64>, String> {
+    next_after(
+        &schedule.kind,
+        &schedule.expression,
+        &schedule.timezone,
+        schedule.restart_delay_sec,
+        after_ms,
+    )
 }
 
 fn ensure_next(app: &AppHandle, schedule: &mut Schedule) -> Result<(), String> {
@@ -51,13 +70,13 @@ fn ensure_next(app: &AppHandle, schedule: &mut Schedule) -> Result<(), String> {
         return Ok(());
     }
     let now = db::now_ms();
-    let next = if schedule.kind == "once" {
-        cron::parse_once(&schedule.expression).ok()
-    } else if schedule.kind == "loop" {
-        Some(now)
-    } else {
-        schedule_next(schedule, now).ok().flatten()
-    };
+    let next = initial_next(
+        &schedule.kind,
+        &schedule.expression,
+        &schedule.timezone,
+        schedule.restart_delay_sec,
+        now,
+    )?;
     if next.is_some() {
         let state = app.state::<AppState>();
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
@@ -90,7 +109,7 @@ fn fire_once(app: &AppHandle, schedule: &mut Schedule, scheduled_at: i64) -> Res
         let next = if matches!(schedule.kind.as_str(), "once" | "loop") {
             None
         } else {
-            next_for_schedule(schedule, now).unwrap_or(None)
+            next_for_schedule(schedule, now)?
         };
         set_next(app, schedule, next)?;
         return Ok(());
@@ -120,7 +139,7 @@ fn fire_once(app: &AppHandle, schedule: &mut Schedule, scheduled_at: i64) -> Res
     let next = if matches!(schedule.kind.as_str(), "once" | "loop") {
         None
     } else {
-        next_for_schedule(schedule, now.max(scheduled_at)).unwrap_or(None)
+        next_for_schedule(schedule, now.max(scheduled_at))?
     };
     match runner::start_with(app, script, options) {
         Ok(event) => {
@@ -146,13 +165,13 @@ fn fire_once(app: &AppHandle, schedule: &mut Schedule, scheduled_at: i64) -> Res
             } else if schedule.kind == "once" {
                 None
             } else {
-                next_for_schedule(schedule, now).unwrap_or(None)
+                next_for_schedule(schedule, now)?
             };
             set_next(app, schedule, next)?;
-            if schedule.kind == "once" {
-                if let Ok(conn) = state.db.lock() {
-                    let _ = db::set_schedule_enabled(&conn, &schedule.id, false);
-                }
+            if schedule.kind == "once"
+                && let Ok(conn) = state.db.lock()
+            {
+                let _ = db::set_schedule_enabled(&conn, &schedule.id, false);
             }
         }
     }
@@ -336,7 +355,7 @@ fn update_schedule_result(
             .map(|values| values.entry(schedule.id.clone()).or_insert(0))
             .copied()
             .unwrap_or(0);
-        let mut delay = schedule.restart_delay_sec.max(0) as i64;
+        let mut delay = schedule.restart_delay_sec.max(0);
         if delay == 0 {
             delay = cron::parse_interval(&schedule.expression)
                 .map(|value| value / 1000)
@@ -400,12 +419,12 @@ fn update_schedule_result(
                 let _ = db::set_schedule_enabled(&conn, &schedule.id, false);
             }
         }
-    } else if schedule.last_run_id.as_deref() == Some(event.run_id.as_str()) {
-        if let Ok(conn) = state.db.lock() {
-            let _ = db::mark_schedule_result(&conn, &schedule.id, &event.status, None);
-            if schedule.kind == "once" {
-                let _ = db::set_schedule_enabled(&conn, &schedule.id, false);
-            }
+    } else if schedule.last_run_id.as_deref() == Some(event.run_id.as_str())
+        && let Ok(conn) = state.db.lock()
+    {
+        let _ = db::mark_schedule_result(&conn, &schedule.id, &event.status, None);
+        if schedule.kind == "once" {
+            let _ = db::set_schedule_enabled(&conn, &schedule.id, false);
         }
     }
     let _ = app.emit("schedules-changed", ());
@@ -444,4 +463,42 @@ pub fn run_now(app: &AppHandle, schedule: &Schedule) -> Result<String, String> {
     }
     let _ = app.emit("schedules-changed", ());
     Ok(event.run_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{initial_next, next_after};
+
+    #[test]
+    fn loop_uses_restart_delay_or_expression() {
+        assert_eq!(
+            next_after("loop", "5m", "local", 0, 1_000).unwrap(),
+            Some(301_000)
+        );
+        assert_eq!(
+            next_after("loop", "5m", "local", 10, 1_000).unwrap(),
+            Some(11_000)
+        );
+    }
+
+    #[test]
+    fn once_has_no_follow_up_run() {
+        assert_eq!(
+            next_after("once", "2026-01-01 00:00:00", "local", 0, 0).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn initial_loop_starts_immediately() {
+        assert_eq!(
+            initial_next("loop", "1s", "local", 0, 5_000).unwrap(),
+            Some(5_000)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_kind() {
+        assert!(next_after("unknown", "", "local", 0, 0).is_err());
+    }
 }

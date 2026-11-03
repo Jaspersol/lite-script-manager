@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { api, formatTime, friendlyError } from "./api";
+  import { createListenerGroup } from "./listeners";
   import Icon from "./Icon.svelte";
   import { pageAction } from "./uiActions";
   import type { PageAction } from "./uiActions";
@@ -27,7 +27,8 @@
   let events: TriggerEvent[] = $state([]);
   let loading = $state(true);
   let editing: Trigger | null = $state(null);
-  let edit = $state<TriggerEdit | null>(null);
+  let editorOpen = $state(false);
+  let originalConditions: unknown[] = $state([]);
   let name = $state("");
   let enabled = $state(true);
   let eventType = $state("process_started");
@@ -78,10 +79,6 @@
     return type === "process_started" || type === "process_exited";
   }
 
-  function scriptName(id: string): string {
-    return scripts.find((script) => script.id === id)?.name ?? "已删除脚本";
-  }
-
   async function load() {
     try {
       triggers = await api.listTriggers();
@@ -119,7 +116,8 @@
     forSec = 10;
     hysteresis = 5;
     actions = [blankAction()];
-    edit = { name: "", enabled: true, event_type: "process_started", config_json: "{}", actions_json: "[]", cooldown_sec: 30 };
+    originalConditions = [];
+    editorOpen = true;
   }
 
   function openEdit(trigger: Trigger) {
@@ -131,6 +129,7 @@
     actions = [];
     try {
       const config = JSON.parse(trigger.config_json || "{}");
+      originalConditions = Array.isArray(config.conditions) ? config.conditions : [];
       processName = config.name ?? "";
       processPath = config.path ?? "";
       processParent = config.parent ?? "";
@@ -158,14 +157,7 @@
       // Keep empty actions.
     }
     if (actions.length === 0) actions = [blankAction()];
-    edit = {
-      name: trigger.name,
-      enabled: trigger.enabled,
-      event_type: trigger.event_type,
-      config_json: trigger.config_json,
-      actions_json: trigger.actions_json,
-      cooldown_sec: trigger.cooldown_sec,
-    };
+    editorOpen = true;
   }
 
   function buildConfig(): string {
@@ -178,15 +170,22 @@
       });
     }
     if (isResourceType()) {
-      return JSON.stringify({
-        name: processName.trim(),
-        path: processPath.trim(),
+      const condition = {
         metric,
         op,
         value: Number(value),
         for_sec: Number(forSec),
         hysteresis: Number(hysteresis),
-      });
+      };
+      const config: Record<string, unknown> = {
+        name: processName.trim(),
+        path: processPath.trim(),
+        ...condition,
+      };
+      if (originalConditions.length > 1) {
+        config.conditions = [condition, ...originalConditions.slice(1)];
+      }
+      return JSON.stringify(config);
     }
     return "{}";
   }
@@ -221,7 +220,7 @@
     try {
       if (editing) await api.updateTrigger(editing.id, payload);
       else await api.createTrigger(payload);
-      edit = null;
+      editorOpen = false;
       editing = null;
       await load();
       notify("触发器已保存");
@@ -308,16 +307,9 @@
 
   onMount(() => {
     load();
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    (async () => {
-      const off = await listen("triggers-changed", load);
-      if (disposed) off(); else unlisteners.push(off);
-    })();
-    return () => {
-      disposed = true;
-      unlisteners.forEach((fn) => fn());
-    };
+    const listeners = createListenerGroup();
+    listeners.add("triggers-changed", load);
+    return () => listeners.dispose();
   });
 </script>
 
@@ -379,12 +371,12 @@
   {/if}
 </div>
 
-{#if edit}
-  <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) { edit = null; editing = null; } }}>
+{#if editorOpen}
+  <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) { editorOpen = false; editing = null; } }}>
     <div class="modal wide" role="dialog" aria-modal="true" aria-label="编辑触发器">
       <div class="modal-head">
         <div class="modal-title">{editing ? "编辑触发器" : "新建触发器"}</div>
-        <button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => { edit = null; editing = null; }}><Icon name="close" size={17} /></button>
+        <button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => { editorOpen = false; editing = null; }}><Icon name="close" size={17} /></button>
       </div>
       <div class="modal-body">
         <div class="form-grid">
@@ -466,7 +458,7 @@
         <label class="check-row"><input type="checkbox" bind:checked={enabled} /> 启用此触发器</label>
       </div>
       <div class="modal-foot">
-        <button class="btn" onclick={() => { edit = null; editing = null; }}>取消</button>
+        <button class="btn" onclick={() => { editorOpen = false; editing = null; }}>取消</button>
         <button class="btn btn-primary" onclick={save}>保存</button>
       </div>
     </div>
@@ -485,19 +477,19 @@
   .trigger-name { font-size: 13.5px; font-weight: 550; color: #363c45; }
   .cell-sub { color: #8a919c; font-size: 11px; margin-top: 4px; }
   .trigger-rule { color: #6f7a8d; font-size: 11.5px; margin: 14px 0 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .trigger-meta { display: flex; gap: 12px; color: #8f96a1; font-size: 10.5px; }
+  .trigger-meta { display: flex; gap: 12px; color: var(--faint); font-size: 10.5px; }
   .cell-error { color: #b86666; font-size: 10.5px; margin-top: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .trigger-actions { display: flex; gap: 2px; margin-top: 14px; align-items: center; }
   .trigger-actions .btn:not(.btn-ghost) { background: #eef4fc; color: #4c6da9; }
   .recent-head { margin: 28px 0 11px; }
   .recent-head h3 { font-size: 13px; margin: 0; font-weight: 550; color: #40474f; }
-  .recent-empty { color: #8f96a1; font-size: 11px; padding: 13px 0; }
+  .recent-empty { color: var(--faint); font-size: 11px; padding: 13px 0; }
   .table-card { border: 1px solid var(--line-soft); border-radius: 16px; overflow: hidden; background: #fff; }
   .table-head {
     padding: 11px 16px; color: #8b929d; font-size: 11px; font-weight: 500;
     letter-spacing: .01em; background: #fafbfc; border-bottom: 1px solid var(--line-soft);
   }
-  .table-row { padding: 12px 16px; border-bottom: 1px solid #f3f4f7; font-size: 11px; color: #6f7683; }
+  .table-row { padding: 12px 16px; border-bottom: 1px solid #f3f4f7; font-size: 11px; color: var(--muted); }
   .table-row:last-child { border-bottom: 0; }
   .event-grid { display: grid; grid-template-columns: 130px 130px minmax(140px, 1fr) minmax(180px, 1.4fr); gap: 12px; align-items: center; }
   .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

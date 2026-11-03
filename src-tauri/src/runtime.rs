@@ -249,10 +249,10 @@ fn registry_candidates(spec: &RuntimeSpec) -> Vec<PathBuf> {
                 "SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\",
                 "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\App Paths\\",
             ] {
-                if let Ok(key) = root.open_subkey_with_flags(format!("{prefix}{exe}"), KEY_READ) {
-                    if let Ok(path) = key.get_value::<String, _>("") {
-                        push_candidate(&mut paths, PathBuf::from(path));
-                    }
+                if let Ok(key) = root.open_subkey_with_flags(format!("{prefix}{exe}"), KEY_READ)
+                    && let Ok(path) = key.get_value::<String, _>("")
+                {
+                    push_candidate(&mut paths, PathBuf::from(path));
                 }
             }
         }
@@ -267,13 +267,9 @@ fn registry_candidates(spec: &RuntimeSpec) -> Vec<PathBuf> {
                     for version in core.enum_keys().flatten() {
                         if let Ok(install) =
                             core.open_subkey_with_flags(format!("{version}\\InstallPath"), flags)
+                            && let Ok(directory) = install.get_value::<String, _>("")
                         {
-                            if let Ok(directory) = install.get_value::<String, _>("") {
-                                push_candidate(
-                                    &mut paths,
-                                    PathBuf::from(directory).join("python.exe"),
-                                );
-                            }
+                            push_candidate(&mut paths, PathBuf::from(directory).join("python.exe"));
                         }
                     }
                 }
@@ -285,20 +281,20 @@ fn registry_candidates(spec: &RuntimeSpec) -> Vec<PathBuf> {
         for hive in hives {
             let root = RegKey::predef(hive);
             for key_path in ["SOFTWARE\\R-core\\R", "SOFTWARE\\WOW6432Node\\R-core\\R"] {
-                if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) {
-                    if let Ok(directory) = key.get_value::<String, _>("InstallPath") {
-                        push_candidate(
-                            &mut paths,
-                            PathBuf::from(&directory).join("bin").join("Rscript.exe"),
-                        );
-                        push_candidate(
-                            &mut paths,
-                            PathBuf::from(&directory)
-                                .join("bin")
-                                .join("x64")
-                                .join("Rscript.exe"),
-                        );
-                    }
+                if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ)
+                    && let Ok(directory) = key.get_value::<String, _>("InstallPath")
+                {
+                    push_candidate(
+                        &mut paths,
+                        PathBuf::from(&directory).join("bin").join("Rscript.exe"),
+                    );
+                    push_candidate(
+                        &mut paths,
+                        PathBuf::from(&directory)
+                            .join("bin")
+                            .join("x64")
+                            .join("Rscript.exe"),
+                    );
                 }
             }
         }
@@ -308,11 +304,11 @@ fn registry_candidates(spec: &RuntimeSpec) -> Vec<PathBuf> {
         for hive in hives {
             let root = RegKey::predef(hive);
             for key_path in ["SOFTWARE\\AutoHotkey", "SOFTWARE\\WOW6432Node\\AutoHotkey"] {
-                if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) {
-                    if let Ok(directory) = key.get_value::<String, _>("InstallDir") {
-                        for exe in ["AutoHotkey.exe", "AutoHotkey64.exe", "AutoHotkey32.exe"] {
-                            push_candidate(&mut paths, PathBuf::from(&directory).join(exe));
-                        }
+                if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ)
+                    && let Ok(directory) = key.get_value::<String, _>("InstallDir")
+                {
+                    for exe in ["AutoHotkey.exe", "AutoHotkey64.exe", "AutoHotkey32.exe"] {
+                        push_candidate(&mut paths, PathBuf::from(&directory).join(exe));
                     }
                 }
             }
@@ -326,11 +322,11 @@ fn registry_candidates(spec: &RuntimeSpec) -> Vec<PathBuf> {
                 "SOFTWARE\\AutoIt v3\\AutoIt",
                 "SOFTWARE\\WOW6432Node\\AutoIt v3\\AutoIt",
             ] {
-                if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) {
-                    if let Ok(directory) = key.get_value::<String, _>("InstallDir") {
-                        for exe in ["AutoIt3.exe", "AutoIt3_x64.exe"] {
-                            push_candidate(&mut paths, PathBuf::from(&directory).join(exe));
-                        }
+                if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ)
+                    && let Ok(directory) = key.get_value::<String, _>("InstallDir")
+                {
+                    for exe in ["AutoIt3.exe", "AutoIt3_x64.exe"] {
+                        push_candidate(&mut paths, PathBuf::from(&directory).join(exe));
                     }
                 }
             }
@@ -405,10 +401,10 @@ fn candidates_for(spec: &RuntimeSpec) -> Vec<PathBuf> {
 
     // PATH entries first; this preserves the user's active environment.
     for name in spec.executables {
-        if let Ok(path) = which::which(name) {
-            if !is_windows_store_alias(&path, spec) {
-                push_candidate(&mut paths, path);
-            }
+        if let Ok(path) = which::which(name)
+            && !is_windows_store_alias(&path, spec)
+        {
+            push_candidate(&mut paths, path);
         }
     }
 
@@ -427,10 +423,10 @@ fn candidates_for(spec: &RuntimeSpec) -> Vec<PathBuf> {
         push_glob(&mut paths, pattern);
     }
 
-    if spec.always_available || spec.id == "batch" {
-        if let Some(path) = comspec() {
-            push_candidate(&mut paths, path);
-        }
+    if (spec.always_available || spec.id == "batch")
+        && let Some(path) = comspec()
+    {
+        push_candidate(&mut paths, path);
     }
 
     paths
@@ -468,10 +464,9 @@ fn python_gui_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
             .file_name()
             .and_then(|name| name.to_str())
             .is_some_and(|name| name.eq_ignore_ascii_case("python.exe"))
+            && let Some(parent) = path.parent()
         {
-            if let Some(parent) = path.parent() {
-                push_candidate(&mut values, parent.join("pythonw.exe"));
-            }
+            push_candidate(&mut values, parent.join("pythonw.exe"));
         }
     }
     values
@@ -512,12 +507,11 @@ fn wsh_disabled() -> Option<String> {
             "SOFTWARE\\Microsoft\\Windows Script Host\\Settings",
             "SOFTWARE\\Policies\\Microsoft\\Windows Script Host\\Settings",
         ] {
-            if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) {
-                if let Ok(enabled) = key.get_value::<u32, _>("Enabled") {
-                    if enabled == 0 {
-                        return Some(format!("WSH 已被注册表策略禁用 ({key_path})"));
-                    }
-                }
+            if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ)
+                && let Ok(enabled) = key.get_value::<u32, _>("Enabled")
+                && enabled == 0
+            {
+                return Some(format!("WSH 已被注册表策略禁用 ({key_path})"));
             }
         }
     }
@@ -544,31 +538,30 @@ fn path_details() -> Vec<String> {
         ));
     }
     let root = RegKey::predef(HKEY_CURRENT_USER);
-    if let Ok(environment) = root.open_subkey_with_flags("Environment", KEY_READ) {
-        if let Ok(value) = environment.get_value::<String, _>("Path") {
-            details.push(format!(
-                "用户 PATH: {} 项",
-                value
-                    .split(';')
-                    .filter(|item| !item.trim().is_empty())
-                    .count()
-            ));
-        }
+    if let Ok(environment) = root.open_subkey_with_flags("Environment", KEY_READ)
+        && let Ok(value) = environment.get_value::<String, _>("Path")
+    {
+        details.push(format!(
+            "用户 PATH: {} 项",
+            value
+                .split(';')
+                .filter(|item| !item.trim().is_empty())
+                .count()
+        ));
     }
     let root = RegKey::predef(HKEY_LOCAL_MACHINE);
     if let Ok(environment) = root.open_subkey_with_flags(
         "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
         KEY_READ | KEY_WOW64_64KEY,
-    ) {
-        if let Ok(value) = environment.get_value::<String, _>("Path") {
-            details.push(format!(
-                "系统 PATH: {} 项",
-                value
-                    .split(';')
-                    .filter(|item| !item.trim().is_empty())
-                    .count()
-            ));
-        }
+    ) && let Ok(value) = environment.get_value::<String, _>("Path")
+    {
+        details.push(format!(
+            "系统 PATH: {} 项",
+            value
+                .split(';')
+                .filter(|item| !item.trim().is_empty())
+                .count()
+        ));
     }
     details
 }
@@ -714,35 +707,35 @@ pub fn resolve_executable(
         return Ok(path);
     }
 
-    if spec.id == "batch" {
-        if let Some(path) = comspec() {
-            return Ok(path);
-        }
+    if spec.id == "batch"
+        && let Some(path) = comspec()
+    {
+        return Ok(path);
     }
 
     let candidates = candidates_for(spec);
-    if spec.id == "autohotkey" {
-        if let Some(script_path) = script_path {
-            let requires_v2 = std::fs::read(script_path)
-                .ok()
-                .and_then(|bytes| String::from_utf8(bytes.into_iter().take(8192).collect()).ok())
-                .is_some_and(|text| {
-                    text.lines()
-                        .find(|line| line.trim_start().starts_with("#Requires"))
-                        .is_some_and(|line| line.to_ascii_lowercase().contains("v2"))
-                });
-            for path in &candidates {
-                let version = probe_version(path, spec);
-                let is_v2 = version
-                    .as_deref()
-                    .is_some_and(|value| value.starts_with('2'));
-                if is_v2 == requires_v2 {
-                    return Ok(path.clone());
-                }
+    if spec.id == "autohotkey"
+        && let Some(script_path) = script_path
+    {
+        let requires_v2 = std::fs::read(script_path)
+            .ok()
+            .and_then(|bytes| String::from_utf8(bytes.into_iter().take(8192).collect()).ok())
+            .is_some_and(|text| {
+                text.lines()
+                    .find(|line| line.trim_start().starts_with("#Requires"))
+                    .is_some_and(|line| line.to_ascii_lowercase().contains("v2"))
+            });
+        for path in &candidates {
+            let version = probe_version(path, spec);
+            let is_v2 = version
+                .as_deref()
+                .is_some_and(|value| value.starts_with('2'));
+            if is_v2 == requires_v2 {
+                return Ok(path.clone());
             }
-            if requires_v2 {
-                return Err("#Requires AutoHotkey v2，但没有找到 v2 解释器".into());
-            }
+        }
+        if requires_v2 {
+            return Err("#Requires AutoHotkey v2，但没有找到 v2 解释器".into());
         }
     }
 
@@ -800,12 +793,11 @@ fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Option<(String, 
 }
 
 fn parse_version(spec: &RuntimeSpec, text: &str) -> Option<String> {
-    if let Some(pattern) = spec.version_regex {
-        if let Ok(regex) = Regex::new(pattern) {
-            if let Some(captures) = regex.captures(text) {
-                return captures.get(1).map(|m| m.as_str().to_string());
-            }
-        }
+    if let Some(pattern) = spec.version_regex
+        && let Ok(regex) = Regex::new(pattern)
+        && let Some(captures) = regex.captures(text)
+    {
+        return captures.get(1).map(|m| m.as_str().to_string());
     }
     text.lines()
         .map(str::trim)
@@ -821,10 +813,10 @@ fn probe_file_version(exe: &Path) -> Option<String> {
     static CACHE: LazyLock<Mutex<HashMap<String, Option<String>>>> =
         LazyLock::new(|| Mutex::new(HashMap::new()));
     let key = exe.to_string_lossy().to_string();
-    if let Ok(values) = CACHE.lock() {
-        if let Some(value) = values.get(&key) {
-            return value.clone();
-        }
+    if let Ok(values) = CACHE.lock()
+        && let Some(value) = values.get(&key)
+    {
+        return value.clone();
     }
 
     let escaped = key.replace('\'', "''");
@@ -957,11 +949,11 @@ pub fn detect_one(spec: &RuntimeSpec) -> RuntimeInfo {
     } else {
         "ready"
     };
-    if matches!(spec.id, "vbscript" | "jscript" | "wsf") {
-        if let Some(reason) = wsh_disabled() {
-            status = "broken";
-            error = Some(reason);
-        }
+    if matches!(spec.id, "vbscript" | "jscript" | "wsf")
+        && let Some(reason) = wsh_disabled()
+    {
+        status = "broken";
+        error = Some(reason);
     }
     if paths.is_empty() && error.is_none() {
         error = Some("未在 PATH、注册表或常见安装目录中找到可执行文件".to_string());
@@ -1016,21 +1008,27 @@ pub fn detect_all() -> Vec<RuntimeInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     #[test]
-    fn detects_all_supported_runtimes() {
-        let detected = detect_all();
-        assert_eq!(detected.len(), 14);
-
-        for runtime in detected {
-            assert!(!runtime.id.is_empty());
-            if runtime.installed {
-                assert!(runtime.exe_path.is_some(), "{} 缺少路径", runtime.name);
-            }
-            eprintln!(
-                "{:<12} {:<8} {:?} {:?}",
-                runtime.id, runtime.status, runtime.version, runtime.exe_path
-            );
+    fn catalog_is_consistent() {
+        let metas = catalog();
+        assert_eq!(metas.len(), SPECS.len());
+        let mut ids = HashSet::new();
+        for (meta, spec) in metas.iter().zip(SPECS) {
+            assert_eq!(meta.id, spec.id);
+            assert!(!meta.name.is_empty());
+            assert!(!meta.extensions.is_empty());
+            assert!(ids.insert(meta.id.clone()), "重复的运行时 id: {}", meta.id);
         }
+    }
+
+    #[test]
+    fn resolves_runtime_ids_and_extensions() {
+        let python = find_spec("python").expect("python spec");
+        assert!(python.extensions.contains(&"py"));
+        assert_eq!(spec_for_extension("py").map(|spec| spec.id), Some("python"));
+        assert!(find_spec("missing").is_none());
+        assert!(spec_for_extension("missing").is_none());
     }
 }

@@ -156,6 +156,40 @@ fn process_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str
     true
 }
 
+/// Reads command lines for processes that a path/command trigger could match.
+/// Doing this while every candidate is still alive lets `process_exited`
+/// triggers match too, and the result is cached in the snapshot for later ticks.
+fn enrich_process_triggers(triggers: &[Trigger], snapshot: &mut HashMap<u32, ProcessMeta>) {
+    for trigger in triggers {
+        if !matches!(
+            trigger.event_type.as_str(),
+            "process_started" | "process_exited"
+        ) {
+            continue;
+        }
+        let config = parse_config(trigger);
+        if config.path.trim().is_empty() && config.command.trim().is_empty() {
+            continue;
+        }
+        let pids = snapshot
+            .iter()
+            .filter(|(_, meta)| {
+                let parent = snapshot
+                    .get(&meta.parent)
+                    .map(|value| value.name.as_str())
+                    .unwrap_or("");
+                identity_matches(&config, meta, parent)
+            })
+            .map(|(pid, _)| *pid)
+            .collect::<Vec<_>>();
+        for pid in pids {
+            if let Some(meta) = snapshot.get_mut(&pid) {
+                enrich(meta);
+            }
+        }
+    }
+}
+
 fn compare(metric: f64, op: &str, value: f64) -> bool {
     match op {
         ">" => metric > value,
@@ -302,19 +336,19 @@ pub fn fire_manual(app: &AppHandle, trigger_id: &str) -> Result<String, String> 
 
 fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<String, String> {
     let state = app.state::<AppState>();
-    if let Some(conn) = state.db.lock().ok() {
-        if let Ok(Some(current)) = db::get_trigger(&conn, &trigger.id) {
-            if !current.enabled && event != "manual" {
-                return Ok("disabled".into());
-            }
-            if event != "manual"
-                && current.cooldown_sec > 0
-                && current.last_triggered_at.is_some_and(|last| {
-                    db::now_ms().saturating_sub(last) < current.cooldown_sec * 1000
-                })
-            {
-                return Ok("cooldown".into());
-            }
+    if let Ok(conn) = state.db.lock()
+        && let Ok(Some(current)) = db::get_trigger(&conn, &trigger.id)
+    {
+        if !current.enabled && event != "manual" {
+            return Ok("disabled".into());
+        }
+        if event != "manual"
+            && current.cooldown_sec > 0
+            && current
+                .last_triggered_at
+                .is_some_and(|last| db::now_ms().saturating_sub(last) < current.cooldown_sec * 1000)
+        {
+            return Ok("cooldown".into());
         }
     }
 
@@ -323,9 +357,7 @@ fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<Strin
     for action in actions {
         let result = match action.kind.as_str() {
             "run_script" => run_action_script(app, &action, trigger, false),
-            "stop_script" => runner::stop(app, &action.script_id)
-                .map(|_| "stopped".to_string())
-                .map_err(|error| error),
+            "stop_script" => runner::stop(app, &action.script_id).map(|_| "stopped".to_string()),
             "restart_script" => run_action_script(app, &action, trigger, true),
             "enable_trigger" | "disable_trigger" => {
                 let enabled = action.kind == "enable_trigger";
@@ -457,9 +489,10 @@ fn fire_process_matches(
         }) else {
             continue;
         };
-        let mut meta = meta.clone();
+        let meta = meta.clone();
         let parent = current
             .get(&meta.parent)
+            .or_else(|| previous.get(&meta.parent))
             .map(|value| value.name.as_str())
             .unwrap_or("")
             .to_string();
@@ -468,25 +501,12 @@ fn fire_process_matches(
                 continue;
             }
             let config = parse_config(trigger);
-            if !(config.path.trim().is_empty() && config.command.trim().is_empty())
-                && meta.path.is_none()
-            {
-                enrich(&mut meta);
-            }
-            if process_matches(&config, &meta, &parent) {
-                if let Err(error) =
+            if process_matches(&config, &meta, &parent)
+                && let Err(error) =
                     fire_trigger(app, trigger, &format!("{event_type}:{}:{}", meta.name, pid))
-                {
-                    logging::app_log("ERROR", &format!("触发器执行失败: {error}"));
-                }
+            {
+                logging::app_log("ERROR", &format!("触发器执行失败: {error}"));
             }
-        }
-        if event_type == "process_started"
-            && meta.path.is_some()
-            && let Some(live) = current.get_mut(&pid)
-            && live.path.is_none()
-        {
-            live.path = meta.path;
         }
     }
 }
@@ -598,6 +618,7 @@ fn monitor_loop(app: AppHandle) {
                         meta.created_ms = runner::process_create_time_ms(*pid).unwrap_or(0);
                     }
                 }
+                enrich_process_triggers(&triggers, &mut current);
                 if let Some(previous) = previous.as_ref() {
                     fire_process_matches(
                         &app,
@@ -607,9 +628,12 @@ fn monitor_loop(app: AppHandle) {
                         previous,
                     );
                     fire_process_matches(&app, &triggers, "process_exited", &mut current, previous);
-                    // Keep cached command lines for processes that are still alive.
+                    // Reuse previously read command lines without dropping a
+                    // path that was enriched during this tick.
                     for (pid, meta) in &mut current {
-                        if let Some(old) = previous.get(pid) {
+                        if meta.path.is_none()
+                            && let Some(old) = previous.get(pid)
+                        {
                             meta.path = old.path.clone();
                         }
                     }
@@ -709,4 +733,52 @@ fn monitor_loop(app: AppHandle) {
 pub fn start(app: &AppHandle) {
     monitor_loop(app.clone());
     wake(app);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(json: &str) -> TriggerConfig {
+        serde_json::from_str(json).expect("valid trigger config")
+    }
+
+    fn meta(path: Option<&str>) -> ProcessMeta {
+        ProcessMeta {
+            pid: 100,
+            name: "Notepad.exe".into(),
+            parent: 1,
+            created_ms: 0,
+            path: path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn matches_identity_path_and_command() {
+        let config = config(
+            r#"{"name":"notepad.exe","parent":"explorer.exe","path":"windows\\system32","command":"notepad"}"#,
+        );
+        let process = meta(Some(r"C:\Windows\System32\notepad.exe"));
+        assert!(process_matches(&config, &process, "explorer.exe"));
+    }
+
+    #[test]
+    fn rejects_mismatched_identity_or_path() {
+        let process = meta(Some(r"C:\Windows\System32\notepad.exe"));
+        assert!(!process_matches(
+            &config(r#"{"name":"other.exe"}"#),
+            &process,
+            "explorer.exe"
+        ));
+        assert!(!process_matches(
+            &config(r#"{"path":"other"}"#),
+            &process,
+            "explorer.exe"
+        ));
+        assert!(!process_matches(
+            &config(r#"{"path":"notepad"}"#),
+            &meta(None),
+            "explorer.exe"
+        ));
+    }
 }

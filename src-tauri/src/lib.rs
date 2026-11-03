@@ -28,12 +28,41 @@ fn now_ms() -> i64 {
     db::now_ms()
 }
 
-fn default_stop_timeout(state: &AppState) -> i64 {
-    let conn = match state.db.lock() {
-        Ok(conn) => conn,
-        Err(_) => return 3,
-    };
-    settings::get_i64(&conn, "default_stop_timeout", 3).clamp(1, 60)
+fn new_script_record(
+    id: String,
+    name: String,
+    path: String,
+    runtime_id: String,
+    cwd: Option<String>,
+    sort_order: i64,
+    stop_timeout_sec: i64,
+) -> Script {
+    let created_at = now_ms();
+    Script {
+        id,
+        name,
+        path,
+        runtime_id,
+        args: Vec::new(),
+        cwd,
+        env: Default::default(),
+        interpreter_path: None,
+        process_match: None,
+        stop_timeout_sec,
+        timeout_sec: None,
+        stop_mode: "graceful".into(),
+        max_instances: 1,
+        instance_policy: "parallel".into(),
+        success_codes: "0".into(),
+        content_hash: None,
+        sort_order,
+        enabled: true,
+        created_at,
+        updated_at: created_at,
+        status: "stopped".into(),
+        last_error: None,
+        last_run_id: None,
+    }
 }
 
 fn emit_changed(app: &AppHandle) {
@@ -101,16 +130,13 @@ async fn detect_runtimes(
     state: State<'_, AppState>,
     force: bool,
 ) -> Result<Vec<RuntimeInfo>, String> {
-    if !force {
-        if let Ok(cache) = state.runtime_cache.lock() {
-            if let Some((cached_at, cached)) = cache.as_ref() {
-                if cached_at.elapsed() < std::time::Duration::from_secs(3600)
-                    && cached.iter().all(runtime::cached_signature_valid)
-                {
-                    return Ok(cached.clone());
-                }
-            }
-        }
+    if !force
+        && let Ok(cache) = state.runtime_cache.lock()
+        && let Some((cached_at, cached)) = cache.as_ref()
+        && cached_at.elapsed() < std::time::Duration::from_secs(3600)
+        && cached.iter().all(runtime::cached_signature_valid)
+    {
+        return Ok(cached.clone());
     }
     let detected = tauri::async_runtime::spawn_blocking(runtime::detect_all)
         .await
@@ -139,52 +165,31 @@ fn create_script_from_path(
         .ok_or_else(|| format!("无法根据扩展名识别脚本类型: .{extension}"))?;
     let canonical = std::fs::canonicalize(&source).unwrap_or(source.clone());
     let path_key = canonical.display().to_string();
-    {
-        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-        if db::path_exists(&conn, &path_key)? {
-            return Err("这个脚本已经在列表中".to_string());
-        }
-    }
     let name = source
         .file_stem()
         .and_then(|value| value.to_str())
         .unwrap_or("未命名脚本")
         .to_string();
     let cwd = source.parent().map(|p| p.display().to_string());
-    let created_at = now_ms();
-    let sort_order = {
+    let script = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-        db::max_sort_order(&conn)? + 1
-    };
-    let script = Script {
-        id: Uuid::new_v4().to_string(),
-        name,
-        path: path_key,
-        runtime_id: spec.id.to_string(),
-        args: Vec::new(),
-        cwd,
-        env: Default::default(),
-        interpreter_path: None,
-        process_match: None,
-        stop_timeout_sec: default_stop_timeout(&state),
-        timeout_sec: None,
-        stop_mode: "graceful".into(),
-        max_instances: 1,
-        instance_policy: "parallel".into(),
-        success_codes: "0".into(),
-        content_hash: None,
-        sort_order,
-        enabled: true,
-        created_at,
-        updated_at: created_at,
-        status: "stopped".into(),
-        last_error: None,
-        last_run_id: None,
-    };
-    {
-        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        if db::path_exists(&conn, &path_key)? {
+            return Err("这个脚本已经在列表中".to_string());
+        }
+        let sort_order = db::max_sort_order(&conn)? + 1;
+        let stop_timeout = settings::get_i64(&conn, "default_stop_timeout", 3).clamp(1, 60);
+        let script = new_script_record(
+            Uuid::new_v4().to_string(),
+            name,
+            path_key,
+            spec.id.to_string(),
+            cwd,
+            sort_order,
+            stop_timeout,
+        );
         db::insert_script(&conn, &script)?;
-    }
+        script
+    };
     emit_changed(&app);
     Ok(script)
 }
@@ -222,40 +227,24 @@ fn create_new_script(
         counter += 1;
     }
     std::fs::write(&path, content).map_err(|e| format!("写入脚本文件失败: {e}"))?;
-    let created_at = now_ms();
-    let sort_order = {
+    let path_text = path.display().to_string();
+    let cwd = path.parent().map(|p| p.display().to_string());
+    let script = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-        db::max_sort_order(&conn)? + 1
-    };
-    let script = Script {
-        id: Uuid::new_v4().to_string(),
-        name: safe_name,
-        path: path.display().to_string(),
-        runtime_id: spec.id.to_string(),
-        args: Vec::new(),
-        cwd: path.parent().map(|p| p.display().to_string()),
-        env: Default::default(),
-        interpreter_path: None,
-        process_match: None,
-        stop_timeout_sec: default_stop_timeout(&state),
-        timeout_sec: None,
-        stop_mode: "graceful".into(),
-        max_instances: 1,
-        instance_policy: "parallel".into(),
-        success_codes: "0".into(),
-        content_hash: None,
-        sort_order,
-        enabled: true,
-        created_at,
-        updated_at: created_at,
-        status: "stopped".into(),
-        last_error: None,
-        last_run_id: None,
-    };
-    {
-        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        let sort_order = db::max_sort_order(&conn)? + 1;
+        let stop_timeout = settings::get_i64(&conn, "default_stop_timeout", 3).clamp(1, 60);
+        let script = new_script_record(
+            Uuid::new_v4().to_string(),
+            safe_name,
+            path_text,
+            spec.id.to_string(),
+            cwd,
+            sort_order,
+            stop_timeout,
+        );
         db::insert_script(&conn, &script)?;
-    }
+        script
+    };
     emit_changed(&app);
     Ok(script)
 }
@@ -285,15 +274,21 @@ fn pin_script_hash(
     id: String,
     pinned: bool,
 ) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-    let script = db::get_script(&conn, &id)?.ok_or_else(|| "脚本不存在".to_string())?;
+    let path = {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::get_script(&conn, &id)?
+            .ok_or_else(|| "脚本不存在".to_string())?
+            .path
+    };
     let hash = if pinned {
-        Some(logging::sha256_file(std::path::Path::new(&script.path))?)
+        Some(logging::sha256_file(std::path::Path::new(&path))?)
     } else {
         None
     };
-    db::set_script_hash(&conn, &id, hash.as_deref())?;
-    drop(conn);
+    {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::set_script_hash(&conn, &id, hash.as_deref())?;
+    }
     emit_changed(&app);
     Ok(hash)
 }
@@ -354,7 +349,7 @@ fn stop_script(app: AppHandle, state: State<AppState>, id: String) -> Result<(),
 
 #[tauri::command]
 fn stop_all_scripts(app: AppHandle) {
-    runner::stop_all(&app);
+    runner::stop_all(&app, false);
 }
 
 #[tauri::command]
@@ -367,16 +362,6 @@ fn set_log_streaming(state: State<AppState>, visible: bool) {
     state
         .log_streaming
         .store(visible, std::sync::atomic::Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn get_active_log(state: State<AppState>, run_id: String) -> Vec<models::LogLine> {
-    state
-        .runs
-        .lock()
-        .ok()
-        .and_then(|runs| runs.get(&run_id).map(|run| run.ring.snapshot()))
-        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -410,6 +395,24 @@ async fn get_run_log(
         .map_err(|e| format!("读取日志任务失败: {e}"))?
 }
 
+#[cfg(windows)]
+fn spawn_opener(program: &str, path: &str) -> Result<(), String> {
+    std::process::Command::new(program)
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开文件失败: {e}"))
+}
+
+#[cfg(not(windows))]
+fn spawn_opener(_program: &str, path: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("打开文件失败: {e}"))
+}
+
 #[tauri::command]
 fn open_log_file(state: State<AppState>, run_id: String) -> Result<(), String> {
     let path = {
@@ -421,21 +424,7 @@ fn open_log_file(state: State<AppState>, run_id: String) -> Result<(), String> {
     if !std::path::Path::new(&path).exists() {
         return Err("日志文件不存在".to_string());
     }
-    #[cfg(windows)]
-    {
-        std::process::Command::new("explorer.exe")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| format!("打开日志失败: {e}"))?;
-    }
-    #[cfg(not(windows))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(&path)
-            .spawn()
-            .map_err(|e| format!("打开日志失败: {e}"))?;
-    }
-    Ok(())
+    spawn_opener("explorer.exe", &path)
 }
 
 #[tauri::command]
@@ -448,25 +437,7 @@ fn open_script_in_editor(state: State<AppState>, id: String) -> Result<(), Strin
     if !std::path::Path::new(&path).exists() {
         return Err("脚本文件不存在".to_string());
     }
-    open_in_editor(&path)
-}
-
-#[cfg(windows)]
-fn open_in_editor(path: &str) -> Result<(), String> {
-    std::process::Command::new("notepad.exe")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("打开记事本失败: {e}"))
-}
-
-#[cfg(not(windows))]
-fn open_in_editor(path: &str) -> Result<(), String> {
-    std::process::Command::new("xdg-open")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("打开编辑器失败: {e}"))
+    spawn_opener("notepad.exe", &path)
 }
 
 #[tauri::command]
@@ -485,12 +456,6 @@ fn list_runs(
         source.as_deref(),
         limit.unwrap_or(200),
     )
-}
-
-#[tauri::command]
-fn get_run(state: State<AppState>, run_id: String) -> Result<Option<RunRecord>, String> {
-    let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-    db::get_run(&conn, &run_id)
 }
 
 #[tauri::command]
@@ -513,18 +478,13 @@ fn list_schedules(state: State<AppState>) -> Result<Vec<Schedule>, String> {
 }
 
 fn schedule_next_for_edit(edit: &ScheduleEdit) -> Result<Option<i64>, String> {
-    let now = now_ms();
-    match edit.kind.as_str() {
-        "loop" => Ok(Some(now)),
-        "once" => Ok(Some(cron::parse_once(&edit.expression)?)),
-        "cron" | "interval" => Ok(Some(cron::next_run_ms(
-            &edit.kind,
-            &edit.expression,
-            &edit.timezone,
-            now,
-        )?)),
-        other => Err(format!("未知计划类型: {other}")),
-    }
+    scheduler::initial_next(
+        &edit.kind,
+        &edit.expression,
+        &edit.timezone,
+        edit.restart_delay_sec,
+        now_ms(),
+    )
 }
 
 #[tauri::command]
@@ -586,17 +546,13 @@ fn update_schedule(
     if edit.name.trim().is_empty() {
         return Err("计划名称不能为空".to_string());
     }
+    let next = schedule_next_for_edit(&edit)?;
     {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         if db::get_script(&conn, &edit.script_id)?.is_none() {
             return Err("计划关联的脚本不存在".to_string());
         }
-        db::update_schedule(&conn, &id, &edit)?;
-    }
-    let next = schedule_next_for_edit(&edit)?;
-    {
-        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-        db::set_schedule_next(&conn, &id, next)?;
+        db::update_schedule(&conn, &id, &edit, next)?;
     }
     scheduler::wake(&app);
     let _ = app.emit("schedules-changed", ());
@@ -805,20 +761,8 @@ fn close_panel(app: AppHandle) {
 }
 
 #[tauri::command]
-fn close_main(app: AppHandle) {
-    windows::close_main(&app);
-}
-
-#[tauri::command]
-async fn show_main(app: AppHandle) -> Result<(), String> {
+fn show_main(app: AppHandle) -> Result<(), String> {
     windows::ensure_main(&app)
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-async fn show_panel(app: AppHandle) -> Result<(), String> {
-    windows::ensure_panel(&app)
         .map(|_| ())
         .map_err(|e| e.to_string())
 }
@@ -838,7 +782,6 @@ pub fn run() {
                 let _ = windows::ensure_main(app);
             }
         }))
-        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(
@@ -860,7 +803,7 @@ pub fn run() {
             let open_panel = settings::get_bool(&conn, "open_panel_on_start", false);
             app.manage(AppState::new(conn, data_dir));
             let _ = autostart::apply(autostart_enabled);
-            windows::setup_tray(&app)?;
+            windows::setup_tray(app)?;
             scheduler::start(app.handle());
             triggers::start(app.handle());
             if let Err(error) = apply_hotkey(app.handle()) {
@@ -892,12 +835,10 @@ pub fn run() {
             stop_all_scripts,
             adopt_external_runs,
             set_log_streaming,
-            get_active_log,
             get_run_log,
             open_log_file,
             open_script_in_editor,
             list_runs,
-            get_run,
             clear_runs,
             list_schedules,
             create_schedule,
@@ -914,20 +855,51 @@ pub fn run() {
             get_settings,
             update_settings,
             close_panel,
-            close_main,
             show_main,
-            show_panel,
             exit_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                if let Some(state) = app.try_state::<AppState>() {
-                    if !state.exiting.load(std::sync::atomic::Ordering::SeqCst) {
-                        api.prevent_exit();
-                    }
-                }
+            if let tauri::RunEvent::ExitRequested { api, .. } = event
+                && let Some(state) = app.try_state::<AppState>()
+                && !state.exiting.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                api.prevent_exit();
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_log_tail;
+    use std::io::Write;
+
+    #[test]
+    fn log_tail_starts_on_a_line_boundary() {
+        let path = std::env::temp_dir().join(format!("lsm-log-{}.log", uuid::Uuid::new_v4()));
+        let padding = "x".repeat(110);
+        {
+            let mut file =
+                std::io::BufWriter::new(std::fs::File::create(&path).expect("create log"));
+            for index in 0..5000 {
+                writeln!(file, "line {index:04} {padding}").expect("write log line");
+            }
+            file.flush().expect("flush log");
+        }
+        let lines = read_log_tail(path.to_str().unwrap(), 500).expect("read tail");
+        assert_eq!(lines.len(), 500);
+        assert_eq!(lines.first().unwrap(), &format!("line 4500 {padding}"));
+        assert_eq!(lines.last().unwrap(), &format!("line 4999 {padding}"));
+        std::fs::remove_file(path).expect("remove log");
+    }
+
+    #[test]
+    fn log_tail_returns_only_requested_lines() {
+        let path = std::env::temp_dir().join(format!("lsm-log-{}.log", uuid::Uuid::new_v4()));
+        std::fs::write(&path, "first\nsecond\nthird").expect("write log");
+        let lines = read_log_tail(path.to_str().unwrap(), 2).expect("read tail");
+        assert_eq!(lines, vec!["second".to_string(), "third".to_string()]);
+        std::fs::remove_file(path).expect("remove log");
+    }
 }

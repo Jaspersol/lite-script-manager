@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { api, formatBytes, formatDuration, formatTime, friendlyError } from "./api";
+  import { formatLogLine, sourceLabel, statusLabel } from "./format";
+  import { createListenerGroup } from "./listeners";
   import Icon from "./Icon.svelte";
   import { pageAction } from "./uiActions";
   import type { PageAction } from "./uiActions";
@@ -24,29 +25,6 @@
   let logLines: string[] = $state([]);
   let logLoading = $state(false);
   let pageSize = $state(200);
-
-  function sourceLabel(value: string): string {
-    return {
-      manual: "手动",
-      schedule: "定时",
-      loop: "循环",
-      trigger: "触发器",
-      adopted: "接管",
-      queue: "排队",
-    }[value] ?? value;
-  }
-
-  function statusLabel(value: string): string {
-    return {
-      running: "运行中",
-      queued: "排队中",
-      starting: "启动中",
-      stopping: "停止中",
-      stopped: "已停止",
-      exited: "已结束",
-      failed: "失败",
-    }[value] ?? value;
-  }
 
   async function load() {
     try {
@@ -131,38 +109,28 @@
 
   onMount(() => {
     load();
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    (async () => {
-      let timer: ReturnType<typeof setTimeout> | null = null;
-      const refresh = () => {
-        if (timer) clearTimeout(timer);
-        timer = setTimeout(load, 300);
-      };
-      const offRuns = await listen("runs-changed", refresh);
-      const offState = await listen<RunStateEvent>("run-state", (event) => {
-        if (selected?.id === event.payload.run_id && !["running", "starting", "stopping"].includes(event.payload.status)) {
-          api.setLogStreaming(false).catch(() => {});
-        }
-        refresh();
-      });
-      const offLog = await listen<LogBatchEvent>("run-log-batch", (event) => {
-        if (selected?.id !== event.payload.run_id) return;
-        const lines = event.payload.lines.map((line) => `[${line.stream}] ${line.line}`);
-        logLines = [...logLines, ...lines].slice(-1000);
-      });
-      if (disposed) {
-        offRuns();
-        offState();
-        offLog();
-      } else {
-        unlisteners.push(offRuns, offState, offLog);
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const refresh = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(load, 300);
+    };
+    const listeners = createListenerGroup();
+    listeners.add("runs-changed", refresh);
+    listeners.add<RunStateEvent>("run-state", (event) => {
+      if (selected?.id === event.payload.run_id && !["running", "starting", "stopping"].includes(event.payload.status)) {
+        api.setLogStreaming(false).catch(() => {});
       }
-    })();
+      refresh();
+    });
+    listeners.add<LogBatchEvent>("run-log-batch", (event) => {
+      if (selected?.id !== event.payload.run_id) return;
+      const lines = event.payload.lines.map(formatLogLine);
+      logLines = [...logLines, ...lines].slice(-1000);
+    });
     return () => {
-      disposed = true;
+      if (timer) clearTimeout(timer);
       api.setLogStreaming(false).catch(() => {});
-      unlisteners.forEach((fn) => fn());
+      listeners.dispose();
     };
   });
 </script>
@@ -175,7 +143,7 @@
     </select>
     <select class="select" bind:value={statusFilter} onchange={setFilter}>
       <option value="">全部状态</option>
-      <option value="running">运行中</option><option value="queued">排队中</option><option value="stopped">已停止</option><option value="exited">已结束</option><option value="failed">失败</option>
+      <option value="running">运行中</option><option value="queued">排队中</option><option value="starting">启动中</option><option value="stopping">停止中</option><option value="stopped">已停止</option><option value="exited">已结束</option><option value="failed">失败</option>
     </select>
     <select class="select" bind:value={sourceFilter} onchange={setFilter}>
       <option value="">全部来源</option>
@@ -276,7 +244,7 @@
   .right { text-align: right; }
   .log-open {
     width: 26px; height: 26px; display: inline-grid; place-items: center;
-    border-radius: 8px; color: #8f96a1; cursor: pointer;
+    border-radius: 8px; color: var(--faint); cursor: pointer;
     transition: background-color var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
   }
   .log-open:hover { background: #f1f3f7; color: #5b7bb9; }
@@ -287,7 +255,7 @@
   .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .detail-title { font-size: 13.5px; font-weight: 550; color: #363c45; }
   .detail-grid { display: grid; grid-template-columns: 70px 1fr; gap: 9px 10px; margin: 16px 0; font-size: 11.5px; }
-  .detail-grid span { color: #8f96a1; }
+  .detail-grid span { color: var(--faint); }
   .detail-grid strong { font-weight: 500; color: #4b525d; }
   .detail-error { padding: 9px 11px; border: 1px solid #f2dddd; border-radius: 10px; color: #ad5c5c; background: #fffafa; font-size: 11px; line-height: 1.5; margin-bottom: 13px; }
   .log-head { margin-top: 10px; margin-bottom: 9px; align-items: center; }
@@ -296,8 +264,8 @@
     border-radius: 11px; padding: 11px 12px; font-size: 11px; line-height: 1.65;
   }
   .log-line { white-space: pre-wrap; word-break: break-word; color: #5b6675; }
-  .log-empty { color: #8f96a1; padding: 8px; }
-  .detail-placeholder { min-height: 280px; display: flex; align-items: center; justify-content: center; flex-direction: column; color: #8f96a1; font-size: 11.5px; text-align: center; }
+  .log-empty { color: var(--faint); padding: 8px; }
+  .detail-placeholder { min-height: 280px; display: flex; align-items: center; justify-content: center; flex-direction: column; color: var(--faint); font-size: 11.5px; text-align: center; }
   .detail-placeholder p { max-width: 210px; line-height: 1.6; }
   .empty-icon { color: #bdc5d0; display: grid; place-items: center; }
   .empty-state.small { min-height: 240px; }

@@ -5,7 +5,6 @@
   "windows": ["main", "panel"],
   "permissions": [
     "core:default",
-    "opener:default",
     "dialog:default",
     "notification:default",
     "global-shortcut:default"

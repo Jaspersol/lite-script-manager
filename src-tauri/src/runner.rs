@@ -480,53 +480,19 @@ fn executable_allowed(script: &Script, exe: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn spawn_adopted_monitor(
-    app: AppHandle,
-    run_id: String,
-    script_id: String,
-    guard: Arc<JobHandle>,
-    stopped: Arc<AtomicBool>,
-    started_at: i64,
-    pids: Vec<u32>,
-) {
+fn spawn_adopted_monitor(app: AppHandle, handle: RunHandle) {
     tauri::async_runtime::spawn(async move {
-        while guard.active_processes() > 0 || pids.iter().any(|pid| process_alive(*pid)) {
+        while handle.guard.active_processes() > 0
+            || handle.pids.iter().any(|pid| process_alive(*pid))
+        {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        let state = app.state::<AppState>();
-        let status = if stopped.load(Ordering::SeqCst) {
+        let status = if handle.stopped.load(Ordering::SeqCst) {
             "stopped"
         } else {
             "exited"
         };
-        if let Ok(conn) = state.db.lock() {
-            let _ = db::finish_run(&conn, &run_id, status, None, None, None, None, None, None);
-        }
-        if let Ok(mut runs) = state.runs.lock() {
-            runs.remove(&run_id);
-        }
-        let _ = app.emit(
-            "run-state",
-            RunStateEvent {
-                run_id: run_id.clone(),
-                script_id: script_id.clone(),
-                status: status.to_string(),
-                exit_code: None,
-                error: None,
-                started_at,
-                ended_at: Some(db::now_ms()),
-                source: Some("adopted".into()),
-                source_id: None,
-            },
-        );
-        let _ = state.lifecycle_tx.send(LifecycleEvent {
-            run_id,
-            script_id,
-            status: status.into(),
-            exit_code: None,
-            source: "adopted".into(),
-            source_id: None,
-        });
+        finish_run(&app, &handle, status, None, None);
     });
 }
 
@@ -665,7 +631,7 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                     .runs
                     .lock()
                     .map_err(|_| "运行状态锁失败".to_string())?;
-                runs.insert(run_id.clone(), handle);
+                runs.insert(run_id.clone(), handle.clone());
             }
             for pid in &pids {
                 managed_pids.insert(*pid);
@@ -685,15 +651,7 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                     source_id: None,
                 },
             );
-            spawn_adopted_monitor(
-                app.clone(),
-                run_id,
-                script.id.clone(),
-                guard,
-                stopped,
-                started_at,
-                pids,
-            );
+            spawn_adopted_monitor(app.clone(), handle);
             adopted += 1;
         }
         Ok(adopted)
@@ -780,10 +738,11 @@ fn success_code_allowed(expression: &str, code: i32) -> bool {
         if let Some((start, end)) = part.split_once('-') {
             let start = start.trim().parse::<i32>().ok();
             let end = end.trim().parse::<i32>().ok();
-            if let (Some(start), Some(end)) = (start, end) {
-                if code >= start && code <= end {
-                    return true;
-                }
+            if let (Some(start), Some(end)) = (start, end)
+                && code >= start
+                && code <= end
+            {
+                return true;
             }
         } else if part.parse::<i32>().ok() == Some(code) {
             return true;
@@ -827,12 +786,10 @@ fn preflight(app: &AppHandle, script: &Script) -> Result<(), String> {
     {
         return Err("环境变量名称无效".to_string());
     }
-    if verify_hash {
-        if let Some(expected) = &script.content_hash {
-            let actual = logging::sha256_file(&path)?;
-            if !actual.eq_ignore_ascii_case(expected) {
-                return Err("脚本内容哈希不匹配，已拒绝运行".to_string());
-            }
+    if verify_hash && let Some(expected) = &script.content_hash {
+        let actual = logging::sha256_file(&path)?;
+        if !actual.eq_ignore_ascii_case(expected) {
+            return Err("脚本内容哈希不匹配，已拒绝运行".to_string());
         }
     }
     Ok(())
@@ -939,18 +896,27 @@ fn flush_log_batch(app: &AppHandle, run_id: &str, script_id: &str, batch: &mut V
     );
 }
 
-async fn pump_output<R>(
-    reader: R,
-    stream: &'static str,
+struct OutputSink {
     log: Arc<AsyncMutex<BufWriter<tokio::fs::File>>>,
     app: AppHandle,
     run_id: String,
     script_id: String,
     ring: Arc<LogRing>,
     log_bytes: Arc<AtomicU64>,
-) where
+}
+
+async fn pump_output<R>(reader: R, stream: &'static str, sink: OutputSink)
+where
     R: tokio::io::AsyncRead + Unpin,
 {
+    let OutputSink {
+        log,
+        app,
+        run_id,
+        script_id,
+        ring,
+        log_bytes,
+    } = sink;
     let mut reader = BufReader::new(reader);
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1417,32 +1383,24 @@ pub fn start_with(
         64 * 1024,
         log_file,
     )));
+    let sink = || OutputSink {
+        log: log.clone(),
+        app: app.clone(),
+        run_id: run_id.clone(),
+        script_id: script.id.clone(),
+        ring: handle.ring.clone(),
+        log_bytes: handle.log_bytes.clone(),
+    };
     if let Some(stdout) = child.stdout.take() {
-        let app = app.clone();
-        let log = log.clone();
-        let run_id = run_id.clone();
-        let script_id = script.id.clone();
-        let ring = handle.ring.clone();
-        let log_bytes = handle.log_bytes.clone();
+        let sink = sink();
         tauri::async_runtime::spawn(async move {
-            pump_output(
-                stdout, "stdout", log, app, run_id, script_id, ring, log_bytes,
-            )
-            .await;
+            pump_output(stdout, "stdout", sink).await;
         });
     }
     if let Some(stderr) = child.stderr.take() {
-        let app = app.clone();
-        let log = log.clone();
-        let run_id = run_id.clone();
-        let script_id = script.id.clone();
-        let ring = handle.ring.clone();
-        let log_bytes = handle.log_bytes.clone();
+        let sink = sink();
         tauri::async_runtime::spawn(async move {
-            pump_output(
-                stderr, "stderr", log, app, run_id, script_id, ring, log_bytes,
-            )
-            .await;
+            pump_output(stderr, "stderr", sink).await;
         });
     }
 
@@ -1451,6 +1409,58 @@ pub fn start_with(
     spawn_waiter(app.clone(), child, handle);
 
     Ok(event)
+}
+
+fn stop_handle(app: &AppHandle, handle: &RunHandle, reason: &str, force: bool) {
+    handle.stopped.store(true, Ordering::SeqCst);
+    if let Ok(mut value) = handle.stop_reason.lock() {
+        *value = Some(reason.to_string());
+    }
+    let force = force || handle.stop_mode == "force";
+    if force {
+        handle.guard.terminate();
+        terminate_process_trees(&handle.pids);
+    } else {
+        handle
+            .guard
+            .request_graceful(handle.pid, &handle.runtime_id);
+    }
+    let _ = app.emit(
+        "run-state",
+        RunStateEvent {
+            run_id: handle.run_id.clone(),
+            script_id: handle.script_id.clone(),
+            status: "stopping".into(),
+            exit_code: None,
+            error: None,
+            started_at: handle.started_at,
+            ended_at: None,
+            source: Some(handle.source.clone()),
+            source_id: handle.source_id.clone(),
+        },
+    );
+
+    if force {
+        return;
+    }
+    let app_for_timer = app.clone();
+    let guard = handle.guard.clone();
+    let pids = handle.pids.clone();
+    let run_id = handle.run_id.clone();
+    let timeout = handle.stop_timeout_sec.max(1) as u64;
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(timeout)).await;
+        let still_running = app_for_timer
+            .state::<AppState>()
+            .runs
+            .lock()
+            .map(|runs| runs.contains_key(&run_id))
+            .unwrap_or(false);
+        if still_running {
+            guard.terminate();
+            terminate_process_trees(&pids);
+        }
+    });
 }
 
 pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
@@ -1468,73 +1478,22 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
     if handles.is_empty() {
         return Err("脚本当前没有运行中的实例".to_string());
     }
-    for handle in handles {
-        handle.stopped.store(true, Ordering::SeqCst);
-        if let Ok(mut reason) = handle.stop_reason.lock() {
-            *reason = Some("user".into());
-        }
-        if handle.stop_mode == "force" {
-            handle.guard.terminate();
-            terminate_process_trees(&handle.pids);
-        } else {
-            handle
-                .guard
-                .request_graceful(handle.pid, &handle.runtime_id);
-        }
-        let _ = app.emit(
-            "run-state",
-            RunStateEvent {
-                run_id: handle.run_id.clone(),
-                script_id: handle.script_id.clone(),
-                status: "stopping".into(),
-                exit_code: None,
-                error: None,
-                started_at: handle.started_at,
-                ended_at: None,
-                source: Some(handle.source.clone()),
-                source_id: handle.source_id.clone(),
-            },
-        );
-
-        if handle.stop_mode == "force" {
-            continue;
-        }
-        let app_for_timer = app.clone();
-        let guard = handle.guard.clone();
-        let pids = handle.pids.clone();
-        let run_id = handle.run_id.clone();
-        let timeout = handle.stop_timeout_sec.max(1) as u64;
-        tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(timeout)).await;
-            let still_running = app_for_timer
-                .state::<AppState>()
-                .runs
-                .lock()
-                .map(|runs| runs.contains_key(&run_id))
-                .unwrap_or(false);
-            if still_running {
-                guard.terminate();
-                terminate_process_trees(&pids);
-            }
-        });
+    for handle in &handles {
+        stop_handle(app, handle, "user", false);
     }
     Ok(())
 }
 
-pub fn stop_all(app: &AppHandle) {
+pub fn stop_all(app: &AppHandle, force: bool) {
     let state = app.state::<AppState>();
     let handles = {
         let runs = state.runs.lock().ok();
         runs.map(|runs| runs.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
     };
-    for handle in handles {
-        handle.stopped.store(true, Ordering::SeqCst);
-        if let Ok(mut reason) = handle.stop_reason.lock() {
-            *reason = Some("app_exit".into());
-        }
-        handle.guard.terminate();
-        terminate_process_trees(&handle.pids);
+    let reason = if force { "app_exit" } else { "user" };
+    for handle in &handles {
+        stop_handle(app, handle, reason, force);
     }
 }
 

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { api, formatTime, friendlyError } from "./api";
+  import { scriptName, statusLabel } from "./format";
+  import { createListenerGroup } from "./listeners";
   import Icon from "./Icon.svelte";
   import { pageAction } from "./uiActions";
   import type { PageAction } from "./uiActions";
@@ -28,10 +29,6 @@
     once: "一次性",
     loop: "循环重启",
   };
-
-  function scriptName(id: string): string {
-    return scripts.find((item) => item.id === id)?.name ?? "已删除脚本";
-  }
 
   function editFrom(schedule: Schedule): ScheduleEdit {
     return {
@@ -173,17 +170,6 @@
     return new Set([...counts.entries()].filter(([, count]) => count > 1).map(([id]) => id));
   });
 
-  function statusLabel(status: string | null): string {
-    return {
-      running: "运行中",
-      queued: "排队中",
-      stopped: "已停止",
-      exited: "已结束",
-      failed: "失败",
-      skipped: "已跳过",
-    }[status ?? ""] ?? "未运行";
-  }
-
   $effect(() => {
     const action: PageAction = {
       label: "新建计划",
@@ -198,16 +184,9 @@
 
   onMount(() => {
     load();
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    (async () => {
-      const off = await listen("schedules-changed", load);
-      if (disposed) off(); else unlisteners.push(off);
-    })();
-    return () => {
-      disposed = true;
-      unlisteners.forEach((fn) => fn());
-    };
+    const listeners = createListenerGroup();
+    listeners.add("schedules-changed", load);
+    return () => listeners.dispose();
   });
 </script>
 
@@ -235,7 +214,7 @@
             </div>
             <div class="cell-sub">{kindLabels[schedule.kind] ?? schedule.kind} · {schedule.timezone}</div>
           </div>
-          <div class="ellipsis">{scriptName(schedule.script_id)}</div>
+          <div class="ellipsis">{scriptName(scripts, schedule.script_id)}</div>
           <div class="mono expression">{schedule.expression}</div>
           <div class="cell-sub">{schedule.enabled ? formatTime(schedule.next_run_at) : "已禁用"}</div>
           <div>
@@ -396,7 +375,7 @@
   .cell-title { font-weight: 550; display: flex; align-items: center; gap: 6px; color: #363c45; }
   .cell-sub { color: #8a919c; font-size: 11px; margin-top: 4px; }
   .cell-error { color: #b86666; font-size: 10.5px; margin-top: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 240px; }
-  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #6f7683; }
+  .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
   .expression { color: #6f7a8d; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .row-actions { display: flex; justify-content: flex-end; gap: 2px; align-items: center; }
   .row-actions .btn:not(.btn-ghost) { background: #eef4fc; color: #4c6da9; }

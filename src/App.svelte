@@ -1,8 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { open } from "@tauri-apps/plugin-dialog";
   import { api, friendlyError } from "./lib/api";
+  import { isActiveStatus, isBusyStatus, scriptName, statusLabel } from "./lib/format";
+  import { createListenerGroup } from "./lib/listeners";
   import Schedules from "./lib/Schedules.svelte";
   import Triggers from "./lib/Triggers.svelte";
   import History from "./lib/History.svelte";
@@ -48,7 +49,7 @@
     );
   });
 
-  const runningCount = $derived(scripts.filter((s) => s.status === "running" || s.status === "starting").length);
+  const runningCount = $derived(scripts.filter((s) => isActiveStatus(s.status)).length);
   const tabTitle = $derived({
     scripts: "脚本",
     schedules: "计划任务",
@@ -74,22 +75,6 @@
 
   function displayPath(path: string): string {
     return path.replace(/^\\\\\?\\/, "");
-  }
-
-  function isBusy(script: Script): boolean {
-    return script.status === "starting" || script.status === "stopping" || script.status === "queued";
-  }
-
-  function statusLabel(status: string): string {
-    return {
-      stopped: "已停止",
-      queued: "排队中",
-      starting: "启动中",
-      running: "运行中",
-      stopping: "停止中",
-      exited: "已结束",
-      failed: "失败",
-    }[status] ?? status;
   }
 
   function templateFor(runtimeId: string): string {
@@ -158,7 +143,7 @@
   }
 
   async function toggleScript(script: Script) {
-    if (isBusy(script)) return;
+    if (isBusyStatus(script.status)) return;
     const nextStatus = script.status === "running" ? "stopping" : "starting";
     scripts = scripts.map((item) => item.id === script.id ? { ...item, status: nextStatus } : item);
     try {
@@ -342,41 +327,25 @@
     api.getSettings().then((settings: Settings) => {
       if (settings.first_run_done !== "true") firstRun = true;
     }).catch(() => {});
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    (async () => {
-      const unlistenState = await listen<RunStateEvent>("run-state", (event) => {
-        const payload = event.payload;
-        scripts = scripts.map((script) => script.id === payload.script_id
-          ? { ...script, status: payload.status, last_error: payload.error, last_run_id: payload.run_id }
-          : script);
-        if (payload.status === "failed" && payload.error) showToast(`${scriptName(payload.script_id)}：${payload.error}`, "error");
-      });
-      const unlistenScripts = await listen("scripts-changed", () => { refreshScripts(); });
-      const unlistenNotify = await listen<{ title: string; message: string }>("app-notification", (event) => {
-        showToast(`${event.payload.title}：${event.payload.message}`);
-      });
-      const unlistenTrigger = await listen<{ trigger_name: string }>("trigger-fired", (event) => {
-        showToast(`触发器「${event.payload.trigger_name}」已执行`);
-      });
-      if (disposed) {
-        unlistenState();
-        unlistenScripts();
-        unlistenNotify();
-        unlistenTrigger();
-      } else {
-        unlisteners.push(unlistenState, unlistenScripts, unlistenNotify, unlistenTrigger);
+    const listeners = createListenerGroup();
+    listeners.add<RunStateEvent>("run-state", (event) => {
+      const payload = event.payload;
+      scripts = scripts.map((script) => script.id === payload.script_id
+        ? { ...script, status: payload.status, last_error: payload.error, last_run_id: payload.run_id }
+        : script);
+      if (payload.status === "failed" && payload.error) {
+        showToast(`${scriptName(scripts, payload.script_id)}：${payload.error}`, "error");
       }
-    })();
-    return () => {
-      disposed = true;
-      unlisteners.forEach((fn) => fn());
-    };
+    });
+    listeners.add("scripts-changed", () => { refreshScripts(); });
+    listeners.add<{ title: string; message: string }>("app-notification", (event) => {
+      showToast(`${event.payload.title}：${event.payload.message}`);
+    });
+    listeners.add<{ trigger_name: string }>("trigger-fired", (event) => {
+      showToast(`触发器「${event.payload.trigger_name}」已执行`);
+    });
+    return () => listeners.dispose();
   });
-
-  function scriptName(id: string): string {
-    return scripts.find((s) => s.id === id)?.name ?? "脚本";
-  }
 </script>
 
 <svelte:head><title>LiteScriptManager</title></svelte:head>
@@ -754,7 +723,7 @@
     color: #9aa1ac; line-height: 1; pointer-events: none; display: flex;
   }
   .search { padding-left: 36px; height: 36px; }
-  .toolbar-meta { margin-left: auto; color: #8f96a1; font-size: 11.5px; }
+  .toolbar-meta { margin-left: auto; color: var(--faint); font-size: 11.5px; }
   .script-list { border: 1px solid var(--line-soft); border-radius: 16px; overflow: hidden; background: #fff; }
   .list-head, .script-row {
     display: grid; grid-template-columns: 20px minmax(180px, 1fr) 116px 76px 176px;
@@ -779,7 +748,7 @@
   .script-name { font-size: 13px; font-weight: 550; color: #333941; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .script-path { color: #969da8; font-size: 11px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .error-dot { width: 5px; height: 5px; background: var(--danger); border-radius: 50%; flex: 0 0 auto; }
-  .runtime-badge { color: #6f7683; background: #f3f5f9; }
+  .runtime-badge { color: var(--muted); background: #f3f5f9; }
   .status-cell { display: flex; align-items: center; gap: 7px; color: #737b87; font-size: 11.5px; white-space: nowrap; }
   .row-actions { display: flex; justify-content: flex-end; gap: 2px; }
   .run-btn { min-width: 64px; background: #edf3fc; color: #4c6da9; }
@@ -794,7 +763,7 @@
   }
   .runtime-summary strong { font-size: 21px; color: #333941; margin-right: 3px; font-weight: 550; letter-spacing: -.3px; }
   .runtime-summary span { color: #7f8793; font-size: 11.5px; }
-  .runtime-summary .tiny { margin-left: auto; color: #8f96a1; }
+  .runtime-summary .tiny { margin-left: auto; color: var(--faint); }
   .runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
   .runtime-card {
     padding: 16px; border: 1px solid var(--line-soft); border-radius: 16px; background: #fff; min-width: 0;
@@ -806,11 +775,11 @@
   .runtime-head strong { font-size: 13px; font-weight: 550; color: #363c45; }
   .runtime-head .badge { margin-left: auto; }
   .runtime-version { color: #5c7cc1; font-size: 11.5px; margin: 12px 0 5px; }
-  .runtime-path { color: #8f96a1; font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .runtime-path { color: var(--faint); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .runtime-error { color: #b36666; font-size: 11px; margin-top: 7px; line-height: 1.5; }
   .path-picker { display: flex; gap: 10px; align-items: center; margin: 0 0 12px; }
   .path-value {
-    flex: 1; min-width: 0; border: 1px solid var(--line-soft); background: #f6f7f9; color: #6f7683;
+    flex: 1; min-width: 0; border: 1px solid var(--line-soft); background: #f6f7f9; color: var(--muted);
     border-radius: 10px; padding: 9px 11px; font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .small { min-height: 74px; font-size: 12px; }
@@ -822,9 +791,9 @@
     border: 1px solid var(--line-soft); background: #f6f7f9; border-radius: 10px; padding: 7px 11px;
   }
   .hash-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #858c98; }
-  .runtime-details { margin-top: 10px; border-top: 1px solid #f2f3f6; padding-top: 9px; color: #8f96a1; font-size: 10.5px; line-height: 1.6; }
-  .runtime-candidates { margin-top: 8px; font-size: 10.5px; color: #8f96a1; }
-  .runtime-candidates summary { cursor: pointer; color: #8f96a1; transition: color var(--dur-1) var(--ease); }
+  .runtime-details { margin-top: 10px; border-top: 1px solid #f2f3f6; padding-top: 9px; color: var(--faint); font-size: 10.5px; line-height: 1.6; }
+  .runtime-candidates { margin-top: 8px; font-size: 10.5px; color: var(--faint); }
+  .runtime-candidates summary { cursor: pointer; color: var(--faint); transition: color var(--dur-1) var(--ease); }
   .runtime-candidates summary:hover { color: #5f6672; }
   .candidate-row { display: flex; align-items: center; gap: 5px; margin-top: 6px; min-width: 0; }
   .candidate-row .mono { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

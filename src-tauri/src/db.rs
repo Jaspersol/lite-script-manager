@@ -174,79 +174,85 @@ fn add_column_if_missing(
     Ok(())
 }
 
-pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
-    let mut statement = conn
-        .prepare(
-            "SELECT s.id, s.name, s.path, s.runtime_id, s.args_json, s.cwd, s.env_json,
-                    s.interpreter_path, s.process_match, s.stop_timeout_sec, s.timeout_sec,
-                    s.stop_mode, s.max_instances, s.instance_policy, s.success_codes,
-                    s.content_hash, s.sort_order, s.enabled, s.created_at, s.updated_at,
-                    r.id, r.status, r.error, r.exit_code
-             FROM scripts s
-             LEFT JOIN runs r ON r.id = (
-                 SELECT id FROM runs WHERE script_id = s.id ORDER BY started_at DESC LIMIT 1
-             )
-             ORDER BY s.sort_order ASC, s.created_at ASC",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = statement
-        .query_map([], |row| {
-            let args_json: String = row.get(4)?;
-            let env_json: String = row.get(6)?;
-            let last_run_id: Option<String> = row.get(20)?;
-            let last_status: Option<String> = row.get(21)?;
-            let last_error: Option<String> = row.get(22)?;
-            let last_exit: Option<i32> = row.get(23)?;
-            let mut script = Script {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                path: row.get(2)?,
-                runtime_id: row.get(3)?,
-                args: serde_json::from_str(&args_json).unwrap_or_default(),
-                cwd: row.get(5)?,
-                env: serde_json::from_str(&env_json).unwrap_or_default(),
-                interpreter_path: row.get(7)?,
-                process_match: row.get(8)?,
-                stop_timeout_sec: row.get(9)?,
-                timeout_sec: row.get(10)?,
-                stop_mode: row.get(11)?,
-                max_instances: row.get(12)?,
-                instance_policy: row.get(13)?,
-                success_codes: row.get(14)?,
-                content_hash: row.get(15)?,
-                sort_order: row.get(16)?,
-                enabled: row.get::<_, i64>(17)? != 0,
-                created_at: row.get(18)?,
-                updated_at: row.get(19)?,
-                status: "stopped".into(),
-                last_error: None,
-                last_run_id: None,
-            };
-            if let Some(run_id) = last_run_id {
-                script.last_run_id = Some(run_id);
-                let status = last_status.unwrap_or_default();
-                script.status = match status.as_str() {
-                    "running" | "starting" | "stopping" | "queued" => status.clone(),
-                    "failed" => "failed".into(),
-                    _ => "stopped".into(),
-                };
-                script.last_error = last_error.or_else(|| {
-                    if status == "failed" {
-                        Some(format!("上次运行退出码 {}", last_exit.unwrap_or(-1)))
-                    } else {
-                        None
-                    }
-                });
+const SCRIPT_SELECT: &str = "SELECT s.id, s.name, s.path, s.runtime_id, s.args_json, s.cwd,
+        s.env_json, s.interpreter_path, s.process_match, s.stop_timeout_sec, s.timeout_sec,
+        s.stop_mode, s.max_instances, s.instance_policy, s.success_codes, s.content_hash,
+        s.sort_order, s.enabled, s.created_at, s.updated_at,
+        r.id, r.status, r.error, r.exit_code
+     FROM scripts s
+     LEFT JOIN runs r ON r.id = (
+         SELECT id FROM runs WHERE script_id = s.id ORDER BY started_at DESC LIMIT 1
+     )";
+
+fn script_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Script> {
+    let args_json: String = row.get(4)?;
+    let env_json: String = row.get(6)?;
+    let last_run_id: Option<String> = row.get(20)?;
+    let last_status: Option<String> = row.get(21)?;
+    let last_error: Option<String> = row.get(22)?;
+    let last_exit: Option<i32> = row.get(23)?;
+    let mut script = Script {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        path: row.get(2)?,
+        runtime_id: row.get(3)?,
+        args: serde_json::from_str(&args_json).unwrap_or_default(),
+        cwd: row.get(5)?,
+        env: serde_json::from_str(&env_json).unwrap_or_default(),
+        interpreter_path: row.get(7)?,
+        process_match: row.get(8)?,
+        stop_timeout_sec: row.get(9)?,
+        timeout_sec: row.get(10)?,
+        stop_mode: row.get(11)?,
+        max_instances: row.get(12)?,
+        instance_policy: row.get(13)?,
+        success_codes: row.get(14)?,
+        content_hash: row.get(15)?,
+        sort_order: row.get(16)?,
+        enabled: row.get::<_, i64>(17)? != 0,
+        created_at: row.get(18)?,
+        updated_at: row.get(19)?,
+        status: "stopped".into(),
+        last_error: None,
+        last_run_id: None,
+    };
+    if let Some(run_id) = last_run_id {
+        script.last_run_id = Some(run_id);
+        let status = last_status.unwrap_or_default();
+        script.status = match status.as_str() {
+            "running" | "starting" | "stopping" | "queued" => status.clone(),
+            "failed" => "failed".into(),
+            _ => "stopped".into(),
+        };
+        script.last_error = last_error.or_else(|| {
+            if status == "failed" {
+                Some(format!("上次运行退出码 {}", last_exit.unwrap_or(-1)))
+            } else {
+                None
             }
-            Ok(script)
-        })
+        });
+    }
+    Ok(script)
+}
+
+pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
+    let sql = format!("{SCRIPT_SELECT} ORDER BY s.sort_order ASC, s.created_at ASC");
+    let mut statement = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = statement
+        .query_map([], script_from_row)
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn get_script(conn: &Connection, id: &str) -> Result<Option<Script>, String> {
-    let mut scripts = list_scripts(conn)?;
-    Ok(scripts.drain(..).find(|s| s.id == id))
+    conn.query_row(
+        &format!("{SCRIPT_SELECT} WHERE s.id=?1"),
+        params![id],
+        script_from_row,
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
@@ -481,7 +487,8 @@ pub fn list_runs(
             run_record,
         )
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<RunRecord>, String> {
@@ -504,47 +511,56 @@ pub fn clear_runs(conn: &Connection, before_ms: Option<i64>) -> Result<usize, St
     Ok(changed)
 }
 
+const SCHEDULE_SELECT: &str = "SELECT id, name, script_id, kind, expression, timezone, enabled,
+        overlap_policy, catch_up, timeout_sec, success_codes, restart_delay_sec, max_restarts,
+        backoff, next_run_at, last_run_at, last_status, last_error, last_run_id, created_at,
+        updated_at FROM schedules";
+
+fn schedule_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Schedule> {
+    Ok(Schedule {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        script_id: row.get(2)?,
+        kind: row.get(3)?,
+        expression: row.get(4)?,
+        timezone: row.get(5)?,
+        enabled: row.get::<_, i64>(6)? != 0,
+        overlap_policy: row.get(7)?,
+        catch_up: row.get(8)?,
+        timeout_sec: row.get(9)?,
+        success_codes: row.get(10)?,
+        restart_delay_sec: row.get(11)?,
+        max_restarts: row.get(12)?,
+        backoff: row.get::<_, i64>(13)? != 0,
+        next_run_at: row.get(14)?,
+        last_run_at: row.get(15)?,
+        last_status: row.get(16)?,
+        last_error: row.get(17)?,
+        last_run_id: row.get(18)?,
+        created_at: row.get(19)?,
+        updated_at: row.get(20)?,
+    })
+}
+
 pub fn list_schedules(conn: &Connection) -> Result<Vec<Schedule>, String> {
     let mut statement = conn
-        .prepare(
-            "SELECT id, name, script_id, kind, expression, timezone, enabled, overlap_policy,
-                    catch_up, timeout_sec, success_codes, restart_delay_sec, max_restarts, backoff,
-                    next_run_at, last_run_at, last_status, last_error, last_run_id, created_at, updated_at
-             FROM schedules ORDER BY created_at ASC",
-        )
+        .prepare(&format!("{SCHEDULE_SELECT} ORDER BY created_at ASC"))
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map([], |row| {
-            Ok(Schedule {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                script_id: row.get(2)?,
-                kind: row.get(3)?,
-                expression: row.get(4)?,
-                timezone: row.get(5)?,
-                enabled: row.get::<_, i64>(6)? != 0,
-                overlap_policy: row.get(7)?,
-                catch_up: row.get(8)?,
-                timeout_sec: row.get(9)?,
-                success_codes: row.get(10)?,
-                restart_delay_sec: row.get(11)?,
-                max_restarts: row.get(12)?,
-                backoff: row.get::<_, i64>(13)? != 0,
-                next_run_at: row.get(14)?,
-                last_run_at: row.get(15)?,
-                last_status: row.get(16)?,
-                last_error: row.get(17)?,
-                last_run_id: row.get(18)?,
-                created_at: row.get(19)?,
-                updated_at: row.get(20)?,
-            })
-        })
+        .query_map([], schedule_from_row)
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn get_schedule(conn: &Connection, id: &str) -> Result<Option<Schedule>, String> {
-    Ok(list_schedules(conn)?.drain(..).find(|s| s.id == id))
+    conn.query_row(
+        &format!("{SCHEDULE_SELECT} WHERE id=?1"),
+        params![id],
+        schedule_from_row,
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 pub fn insert_schedule(conn: &Connection, schedule: &Schedule) -> Result<(), String> {
@@ -566,11 +582,16 @@ pub fn insert_schedule(conn: &Connection, schedule: &Schedule) -> Result<(), Str
     Ok(())
 }
 
-pub fn update_schedule(conn: &Connection, id: &str, edit: &ScheduleEdit) -> Result<(), String> {
+pub fn update_schedule(
+    conn: &Connection,
+    id: &str,
+    edit: &ScheduleEdit,
+    next_run_at: Option<i64>,
+) -> Result<(), String> {
     conn.execute(
         "UPDATE schedules SET name=?2, script_id=?3, kind=?4, expression=?5, timezone=?6,
             enabled=?7, overlap_policy=?8, catch_up=?9, timeout_sec=?10, success_codes=?11,
-            restart_delay_sec=?12, max_restarts=?13, backoff=?14, updated_at=?15
+            restart_delay_sec=?12, max_restarts=?13, backoff=?14, next_run_at=?15, updated_at=?16
          WHERE id=?1",
         params![
             id,
@@ -587,6 +608,7 @@ pub fn update_schedule(conn: &Connection, id: &str, edit: &ScheduleEdit) -> Resu
             edit.restart_delay_sec.max(0),
             edit.max_restarts.max(0),
             if edit.backoff { 1 } else { 0 },
+            next_run_at,
             now_ms()
         ],
     )
@@ -648,36 +670,44 @@ pub fn delete_schedule(conn: &Connection, id: &str) -> Result<(), String> {
     Ok(())
 }
 
+const TRIGGER_SELECT: &str = "SELECT id, name, enabled, event_type, config_json, actions_json,
+        cooldown_sec, last_triggered_at, last_result, created_at, updated_at FROM triggers";
+
+fn trigger_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Trigger> {
+    Ok(Trigger {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        enabled: row.get::<_, i64>(2)? != 0,
+        event_type: row.get(3)?,
+        config_json: row.get(4)?,
+        actions_json: row.get(5)?,
+        cooldown_sec: row.get(6)?,
+        last_triggered_at: row.get(7)?,
+        last_result: row.get(8)?,
+        created_at: row.get(9)?,
+        updated_at: row.get(10)?,
+    })
+}
+
 pub fn list_triggers(conn: &Connection) -> Result<Vec<Trigger>, String> {
     let mut statement = conn
-        .prepare(
-            "SELECT id, name, enabled, event_type, config_json, actions_json, cooldown_sec,
-                    last_triggered_at, last_result, created_at, updated_at
-             FROM triggers ORDER BY created_at ASC",
-        )
+        .prepare(&format!("{TRIGGER_SELECT} ORDER BY created_at ASC"))
         .map_err(|e| e.to_string())?;
     let rows = statement
-        .query_map([], |row| {
-            Ok(Trigger {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                enabled: row.get::<_, i64>(2)? != 0,
-                event_type: row.get(3)?,
-                config_json: row.get(4)?,
-                actions_json: row.get(5)?,
-                cooldown_sec: row.get(6)?,
-                last_triggered_at: row.get(7)?,
-                last_result: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
-            })
-        })
+        .query_map([], trigger_from_row)
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn get_trigger(conn: &Connection, id: &str) -> Result<Option<Trigger>, String> {
-    Ok(list_triggers(conn)?.drain(..).find(|t| t.id == id))
+    conn.query_row(
+        &format!("{TRIGGER_SELECT} WHERE id=?1"),
+        params![id],
+        trigger_from_row,
+    )
+    .optional()
+    .map_err(|e| e.to_string())
 }
 
 pub fn insert_trigger(conn: &Connection, trigger: &Trigger) -> Result<(), String> {
@@ -782,7 +812,8 @@ pub fn list_trigger_events(conn: &Connection, limit: i64) -> Result<Vec<TriggerE
             })
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())
 }
 
 pub fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
@@ -811,5 +842,99 @@ pub fn get_settings(conn: &Connection) -> Result<HashMap<String, String>, String
     let rows = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    rows.collect::<rusqlite::Result<HashMap<_, _>>>()
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn single_row_queries_and_schedule_update() {
+        let dir = std::env::temp_dir().join(format!("lsm-db-{}", uuid::Uuid::new_v4()));
+        let conn = open(&dir).expect("open database");
+        let now = now_ms();
+        let script = Script {
+            id: "script-1".into(),
+            name: "demo".into(),
+            path: "demo.py".into(),
+            runtime_id: "python".into(),
+            args: vec!["--flag".into()],
+            cwd: None,
+            env: HashMap::new(),
+            interpreter_path: None,
+            process_match: None,
+            stop_timeout_sec: 3,
+            timeout_sec: None,
+            stop_mode: "graceful".into(),
+            max_instances: 1,
+            instance_policy: "parallel".into(),
+            success_codes: "0".into(),
+            content_hash: None,
+            sort_order: 0,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+            status: "stopped".into(),
+            last_error: None,
+            last_run_id: None,
+        };
+        insert_script(&conn, &script).expect("insert script");
+        let loaded = get_script(&conn, "script-1").expect("get script");
+        assert_eq!(
+            loaded.expect("script present").args,
+            vec!["--flag".to_string()]
+        );
+        assert!(get_script(&conn, "missing").expect("get missing").is_none());
+
+        let schedule = Schedule {
+            id: "schedule-1".into(),
+            name: "demo schedule".into(),
+            script_id: "script-1".into(),
+            kind: "cron".into(),
+            expression: "0 9 * * *".into(),
+            timezone: "local".into(),
+            enabled: true,
+            overlap_policy: "skip".into(),
+            catch_up: "none".into(),
+            timeout_sec: None,
+            success_codes: "0".into(),
+            restart_delay_sec: 0,
+            max_restarts: 0,
+            backoff: false,
+            next_run_at: Some(1),
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            last_run_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        insert_schedule(&conn, &schedule).expect("insert schedule");
+        let edit = ScheduleEdit {
+            name: "updated".into(),
+            script_id: "script-1".into(),
+            kind: "cron".into(),
+            expression: "*/5 * * * *".into(),
+            timezone: "local".into(),
+            enabled: true,
+            overlap_policy: "skip".into(),
+            catch_up: "none".into(),
+            timeout_sec: None,
+            success_codes: "0".into(),
+            restart_delay_sec: 0,
+            max_restarts: 0,
+            backoff: false,
+        };
+        update_schedule(&conn, "schedule-1", &edit, Some(12_345)).expect("update schedule");
+        let loaded = get_schedule(&conn, "schedule-1")
+            .expect("get schedule")
+            .expect("schedule present");
+        assert_eq!(loaded.name, "updated");
+        assert_eq!(loaded.expression, "*/5 * * * *");
+        assert_eq!(loaded.next_run_at, Some(12_345));
+        drop(conn);
+        std::fs::remove_dir_all(dir).expect("remove database dir");
+    }
 }

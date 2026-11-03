@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { listen } from "@tauri-apps/api/event";
   import { api, friendlyError } from "./api";
+  import { createListenerGroup } from "./listeners";
   import { pageAction } from "./uiActions";
   import type { PageAction } from "./uiActions";
   import type { Settings } from "./types";
@@ -64,16 +64,9 @@
 
   onMount(() => {
     load();
-    let disposed = false;
-    const unlisteners: Array<() => void> = [];
-    (async () => {
-      const off = await listen("settings-changed", load);
-      if (disposed) off(); else unlisteners.push(off);
-    })();
-    return () => {
-      disposed = true;
-      unlisteners.forEach((fn) => fn());
-    };
+    const listeners = createListenerGroup();
+    listeners.add("settings-changed", load);
+    return () => listeners.dispose();
   });
 </script>
 

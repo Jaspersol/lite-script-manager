@@ -164,7 +164,7 @@ fn apply_light_caption(window: &WebviewWindow) {
     let Ok(hwnd) = window.hwnd() else {
         return;
     };
-    let hwnd = hwnd.0 as *mut core::ffi::c_void;
+    let hwnd = hwnd.0;
     let caption: u32 = 0x00F8F5F4;
     let text: u32 = 0x003B3430;
     let border: u32 = 0x00ECE7E4;
@@ -229,33 +229,13 @@ fn hide_panel(app: &AppHandle) {
     }
 }
 
-pub fn close_main(app: &AppHandle) {
-    let exit_on_close = app
-        .try_state::<AppState>()
-        .and_then(|state| {
-            state
-                .db
-                .lock()
-                .ok()
-                .map(|conn| settings::get_bool(&conn, "close_main_exits", false))
-        })
-        .unwrap_or(false);
-    if exit_on_close {
-        exit_app(app);
-        return;
-    }
-    if let Some(main) = app.get_webview_window(MAIN_LABEL) {
-        let _ = main.destroy();
-    }
-}
-
 pub fn exit_app(app: &AppHandle) {
     if let Some(state) = app.try_state::<AppState>() {
         state
             .exiting
             .store(true, std::sync::atomic::Ordering::SeqCst);
     }
-    runner::stop_all(app);
+    runner::stop_all(app, true);
     app.exit(0);
 }
 

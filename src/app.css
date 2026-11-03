@@ -7,7 +7,6 @@
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   --bg: #f2f3f6;
-  --surface: #fff;
   --text: #2f333b;
   --text-2: #565e69;
   --muted: #6f7683;
@@ -84,7 +83,7 @@ button, input, textarea, select, summary { -webkit-tap-highlight-color: transpar
   background: #fff; border-color: #c9d6f2; box-shadow: 0 0 0 3px rgba(100, 132, 232, .1);
 }
 .textarea { resize: vertical; min-height: 96px; line-height: 1.6; }
-.label { display: block; color: #6f7683; font-size: 12px; margin-bottom: 6px; font-weight: 550; }
+.label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; font-weight: 550; }
 .field { margin-bottom: 16px; }
 .muted { color: var(--muted); }
 .tiny { font-size: 11px; }
@@ -92,7 +91,7 @@ button, input, textarea, select, summary { -webkit-tap-highlight-color: transpar
 
 .badge {
   display: inline-flex; align-items: center; height: 22px; padding: 0 8px;
-  border: 1px solid transparent; border-radius: 7px; color: #6f7683; font-size: 11px;
+  border: 1px solid transparent; border-radius: 7px; color: var(--muted); font-size: 11px;
   background: #f4f5f8; white-space: nowrap; font-weight: 500;
 }
 .badge.ok { color: #4f8a71; background: var(--success-soft); }
