@@ -159,7 +159,7 @@
   });
 </script>
 
-<section class="content">
+<div>
   <div class="filter-row">
     <select class="select" bind:value={scriptFilter} onchange={setFilter}>
       <option value="">全部脚本</option>
@@ -238,7 +238,7 @@
       {/if}
     </aside>
   </div>
-</section>
+</div>
 
 <style>
   .filter-row { display: flex; gap: 7px; margin-bottom: 13px; flex-wrap: wrap; }
@@ -269,6 +269,9 @@
   }
   .log-open:hover { background: #f1f3f7; color: #5b7bb9; }
   .detail-panel { border: 1px solid #eef0f4; border-radius: 16px; background: #fff; padding: 17px; min-height: 320px; }
+  @media (min-width: 1101px) {
+    .detail-panel { position: sticky; top: 0; }
+  }
   .detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
   .detail-title { font-size: 13.5px; font-weight: 550; color: #3b414a; }
   .detail-grid { display: grid; grid-template-columns: 70px 1fr; gap: 8px 10px; margin: 16px 0; font-size: 11px; }
@@ -284,7 +287,7 @@
   .detail-placeholder p { max-width: 210px; line-height: 1.6; }
   .empty-icon { color: #bdc5d0; display: grid; place-items: center; }
   .empty-state.small { min-height: 240px; }
-  @media (max-width: 1060px) {
+  @media (max-width: 1100px) {
     .history-layout { grid-template-columns: 1fr; }
   }
   @media (max-width: 760px) {

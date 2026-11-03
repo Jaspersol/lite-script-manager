@@ -515,11 +515,11 @@
         {/if}
       </section>
     {:else if activeTab === "schedules"}
-      <Schedules {scripts} notify={showToast} />
+      <section class="content"><Schedules {scripts} notify={showToast} /></section>
     {:else if activeTab === "triggers"}
-      <Triggers {scripts} notify={showToast} />
+      <section class="content"><Triggers {scripts} notify={showToast} /></section>
     {:else if activeTab === "history"}
-      <History {scripts} notify={showToast} />
+      <section class="content"><History {scripts} notify={showToast} /></section>
     {:else if activeTab === "runtimes"}
       <section class="content">
         <div class="runtime-summary">
@@ -568,7 +568,7 @@
         {/if}
       </section>
     {:else}
-      <SettingsPage notify={showToast} />
+      <section class="content"><SettingsPage notify={showToast} /></section>
     {/if}
   </main>
 </div>
@@ -719,17 +719,18 @@
   .mini-card-hint { font-size: 9.5px; color: #a7adb7; margin-top: 4px; line-height: 1.45; }
   .version { color: #b3b8c1; font-size: 9.5px; padding: 14px 4px 2px; }
   .workspace {
-    min-width: 0; display: flex; flex-direction: column; overflow: hidden;
+    min-width: 0; min-height: 0; display: flex; flex-direction: column; overflow: hidden;
     background: #fff; border: 1px solid #eef0f4; border-radius: 18px;
   }
   .topbar {
+    flex: 0 0 auto;
     display: flex; align-items: flex-start; justify-content: space-between; gap: 20px;
     padding: 30px 34px 18px;
   }
   .topbar h1 { margin: 0; font-size: 20px; letter-spacing: -.3px; font-weight: 600; color: #30353d; }
   .topbar p { margin: 7px 0 0; color: #969da8; font-size: 11.5px; line-height: 1.5; }
   .topbar-actions { display: flex; gap: 7px; padding-top: 2px; }
-  .content { flex: 1; overflow: auto; padding: 8px 34px 34px; }
+  .content { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 8px 34px 34px; }
   .toolbar { display: flex; align-items: center; gap: 14px; margin-bottom: 15px; }
   .search-wrap { position: relative; width: min(360px, 100%); }
   .search-icon {

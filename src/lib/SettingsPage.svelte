@@ -77,7 +77,7 @@
   });
 </script>
 
-<section class="content">
+<div>
   {#if loading}
     <div class="empty-state"><div class="spinner"></div>正在加载设置…</div>
   {:else}
@@ -139,7 +139,7 @@
       </section>
     </div>
   {/if}
-</section>
+</div>
 
 <style>
   .settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }

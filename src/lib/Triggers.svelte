@@ -321,7 +321,7 @@
   });
 </script>
 
-<section class="content">
+<div>
   {#if loading}
     <div class="empty-state"><div class="spinner"></div>正在加载触发器…</div>
   {:else if triggers.length === 0}
@@ -377,7 +377,7 @@
       {/each}
     </div>
   {/if}
-</section>
+</div>
 
 {#if edit}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) { edit = null; editing = null; } }}>

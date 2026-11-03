@@ -211,7 +211,7 @@
   });
 </script>
 
-<section class="content">
+<div class="schedule-page">
   {#if loading}
     <div class="empty-state"><div class="spinner"></div>正在加载计划…</div>
   {:else if schedules.length === 0}
@@ -252,7 +252,7 @@
       {/each}
     </div>
   {/if}
-</section>
+</div>
 
 {#if edit}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) edit = null; }}>
@@ -376,10 +376,11 @@
 {/if}
 
 <style>
+  .schedule-page { container-type: inline-size; }
   .table-card { border: 1px solid #eef0f4; border-radius: 16px; overflow: hidden; background: #fff; }
   .schedule-grid {
-    display: grid; grid-template-columns: minmax(130px, 1.1fr) 100px minmax(130px, 1.2fr) 110px 92px 156px;
-    gap: 10px; align-items: center;
+    display: grid; grid-template-columns: minmax(110px, 1.15fr) 78px minmax(95px, 1.2fr) 88px 70px 160px;
+    gap: 6px; align-items: center;
   }
   .table-head {
     padding: 12px 16px; color: #979eaa; font-size: 10px; letter-spacing: .08em;
@@ -402,11 +403,8 @@
   .preview-box { border: 1px solid #eef0f4; background: #fbfbfc; border-radius: 12px; padding: 12px 13px; margin: 4px 0 15px; }
   .preview-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; font-size: 11.5px; color: #555d68; }
   .preview-list { color: #5d7bb8; font-size: 10.5px; line-height: 1.65; }
-  @media (max-width: 1100px) {
-    .schedule-grid { grid-template-columns: minmax(115px, 1fr) 84px minmax(110px, 1fr) 96px 78px 156px; gap: 8px; }
-  }
-  @media (max-width: 900px) {
-    .schedule-grid { grid-template-columns: minmax(130px, 1fr) 92px 110px 90px 156px; }
-    .table-row > div:nth-child(3), .table-head > span:nth-child(3) { display: none; }
+  @container (max-width: 665px) {
+    .schedule-grid { grid-template-columns: minmax(115px, 1.1fr) 82px minmax(95px, 1.2fr) 90px 160px; }
+    .table-row > :nth-child(5), .table-head > :nth-child(5) { display: none; }
   }
 </style>
