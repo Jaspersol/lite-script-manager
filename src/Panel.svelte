@@ -26,6 +26,15 @@
     }
   }
 
+  async function adoptExternalRuns() {
+    try {
+      const count = await api.adoptExternalRuns();
+      if (count > 0) await refresh();
+    } catch (e) {
+      error = friendlyError(e);
+    }
+  }
+
   async function toggle(script: Script) {
     if (isBusy(script) || !script.enabled) return;
     busy[script.id] = true;
@@ -59,7 +68,7 @@
   }
 
   onMount(() => {
-    refresh();
+    refresh().finally(adoptExternalRuns);
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     (async () => {

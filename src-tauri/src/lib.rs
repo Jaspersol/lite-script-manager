@@ -97,6 +97,7 @@ fn create_script_from_path(
         cwd,
         env: Default::default(),
         interpreter_path: None,
+        process_match: None,
         stop_timeout_sec: 3,
         sort_order,
         enabled: true,
@@ -158,6 +159,7 @@ fn create_new_script(
         cwd: path.parent().map(|p| p.display().to_string()),
         env: Default::default(),
         interpreter_path: None,
+        process_match: None,
         stop_timeout_sec: 3,
         sort_order,
         enabled: true,
@@ -184,6 +186,7 @@ fn update_script(
     args: Vec<String>,
     cwd: Option<String>,
     interpreter_path: Option<String>,
+    process_match: Option<String>,
     stop_timeout_sec: i64,
     enabled: bool,
 ) -> Result<Script, String> {
@@ -195,6 +198,7 @@ fn update_script(
         &args,
         cwd.as_deref(),
         interpreter_path.as_deref(),
+        process_match.as_deref(),
         stop_timeout_sec,
         enabled,
     )?;
@@ -260,6 +264,11 @@ fn stop_script(app: AppHandle, state: State<AppState>, id: String) -> Result<(),
 #[tauri::command]
 fn stop_all_scripts(app: AppHandle) {
     runner::stop_all(&app);
+}
+
+#[tauri::command]
+async fn adopt_external_runs(app: AppHandle) -> Result<usize, String> {
+    runner::adopt_external(&app)
 }
 
 #[tauri::command]
@@ -348,6 +357,7 @@ pub fn run() {
             run_script,
             stop_script,
             stop_all_scripts,
+            adopt_external_runs,
             get_run_log,
             close_panel,
             close_main,

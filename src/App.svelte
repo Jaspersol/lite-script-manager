@@ -27,6 +27,7 @@
   let editScript: Script | null = $state(null);
   let editArgsText = $state("");
   let editInterpreterPath = $state("");
+  let editProcessMatch = $state("");
   let dragId: string | null = $state(null);
 
   const scriptExtensions = ["py", "js", "mjs", "cjs", "sh", "bash", "pl", "php", "R", "r", "lua", "bat", "cmd", "ps1", "vbs", "vbe", "wsf", "ahk", "au3"];
@@ -113,6 +114,18 @@
     }
   }
 
+  async function adoptExternalRuns() {
+    try {
+      const count = await api.adoptExternalRuns();
+      if (count > 0) {
+        await refreshScripts();
+        showToast(`已接管 ${count} 个运行中的脚本`);
+      }
+    } catch (error) {
+      showToast(friendlyError(error), "error");
+    }
+  }
+
   async function toggleScript(script: Script) {
     if (isBusy(script)) return;
     const nextStatus = script.status === "running" ? "stopping" : "starting";
@@ -181,6 +194,7 @@
     editScript = { ...script, args: [...script.args] };
     editArgsText = script.args.join("\n");
     editInterpreterPath = script.interpreter_path ?? "";
+    editProcessMatch = script.process_match ?? "";
   }
 
   async function saveEdit() {
@@ -192,6 +206,7 @@
         editArgsText.split("\n").map((arg) => arg.trim()).filter((arg) => arg.length > 0),
         editScript.cwd || null,
         editInterpreterPath.trim() || null,
+        editProcessMatch.trim() || null,
         editScript.stop_timeout_sec || 3,
         editScript.enabled,
       );
@@ -254,6 +269,7 @@
   onMount(() => {
     loadCatalog();
     refreshScripts(true).finally(() => { loading = false; });
+    adoptExternalRuns();
     let disposed = false;
     const unlisteners: Array<() => void> = [];
     (async () => {
@@ -490,6 +506,7 @@
         <div class="field"><label class="label" for="edit-args">参数（每行一个）</label><textarea id="edit-args" class="textarea small" bind:value={editArgsText}></textarea></div>
         <div class="field"><label class="label" for="edit-cwd">工作目录（可选）</label><input id="edit-cwd" class="input mono" bind:value={editScript.cwd} /></div>
         <div class="field"><label class="label" for="edit-interpreter">解释器路径（可选）</label><input id="edit-interpreter" class="input mono" placeholder="留空则使用自动检测结果" bind:value={editInterpreterPath} /></div>
+        <div class="field"><label class="label" for="edit-process-match">进程匹配（可选）</label><input id="edit-process-match" class="input mono" placeholder="例如：pi-web；留空则按脚本路径匹配" bind:value={editProcessMatch} /></div>
         <div class="field"><label class="label" for="edit-stop-timeout">停止超时（秒）</label><input id="edit-stop-timeout" class="input" type="number" min="1" max="60" bind:value={editScript.stop_timeout_sec} /></div>
         <label class="check-row"><input type="checkbox" bind:checked={editScript.enabled} /> 启用此脚本（显示在快捷面板中）</label>
       </div>

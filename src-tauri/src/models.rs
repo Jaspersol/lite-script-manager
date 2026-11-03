@@ -13,6 +13,8 @@ pub struct Script {
     pub env: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub interpreter_path: Option<String>,
+    #[serde(default)]
+    pub process_match: Option<String>,
     #[serde(default = "default_stop_timeout")]
     pub stop_timeout_sec: i64,
     pub sort_order: i64,

@@ -26,6 +26,7 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
              cwd TEXT,
              env_json TEXT NOT NULL DEFAULT '{}',
              interpreter_path TEXT,
+             process_match TEXT,
              stop_timeout_sec INTEGER NOT NULL DEFAULT 3,
              sort_order INTEGER NOT NULL DEFAULT 0,
              enabled INTEGER NOT NULL DEFAULT 1,
@@ -53,6 +54,7 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
     .map_err(|e| format!("初始化数据库失败: {e}"))?;
     // Add columns introduced after the first schema version.
     add_column_if_missing(&conn, "scripts", "interpreter_path", "TEXT")?;
+    add_column_if_missing(&conn, "scripts", "process_match", "TEXT")?;
     add_column_if_missing(
         &conn,
         "scripts",
@@ -95,7 +97,7 @@ fn add_column_if_missing(
 pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
     let mut statement = conn
         .prepare(
-            "SELECT id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path, stop_timeout_sec, sort_order, enabled, created_at, updated_at
+            "SELECT id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path, process_match, stop_timeout_sec, sort_order, enabled, created_at, updated_at
              FROM scripts ORDER BY sort_order ASC, created_at ASC",
         )
         .map_err(|e| e.to_string())?;
@@ -112,11 +114,12 @@ pub fn list_scripts(conn: &Connection) -> Result<Vec<Script>, String> {
                 cwd: row.get(5)?,
                 env: serde_json::from_str(&env_json).unwrap_or_default(),
                 interpreter_path: row.get(7)?,
-                stop_timeout_sec: row.get(8)?,
-                sort_order: row.get(9)?,
-                enabled: row.get::<_, i64>(10)? != 0,
-                created_at: row.get(11)?,
-                updated_at: row.get(12)?,
+                process_match: row.get(8)?,
+                stop_timeout_sec: row.get(9)?,
+                sort_order: row.get(10)?,
+                enabled: row.get::<_, i64>(11)? != 0,
+                created_at: row.get(12)?,
+                updated_at: row.get(13)?,
                 status: "stopped".into(),
                 last_error: None,
                 last_run_id: None,
@@ -162,8 +165,8 @@ pub fn get_script(conn: &Connection, id: &str) -> Result<Option<Script>, String>
 
 pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
     conn.execute(
-        "INSERT INTO scripts (id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path, stop_timeout_sec, sort_order, enabled, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO scripts (id, name, path, runtime_id, args_json, cwd, env_json, interpreter_path, process_match, stop_timeout_sec, sort_order, enabled, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             script.id,
             script.name,
@@ -173,6 +176,7 @@ pub fn insert_script(conn: &Connection, script: &Script) -> Result<(), String> {
             script.cwd,
             serde_json::to_string(&script.env).unwrap_or_else(|_| "{}".into()),
             script.interpreter_path,
+            script.process_match,
             script.stop_timeout_sec,
             script.sort_order,
             if script.enabled { 1 } else { 0 },
@@ -191,17 +195,19 @@ pub fn update_script(
     args: &[String],
     cwd: Option<&str>,
     interpreter_path: Option<&str>,
+    process_match: Option<&str>,
     stop_timeout_sec: i64,
     enabled: bool,
 ) -> Result<(), String> {
     conn.execute(
-        "UPDATE scripts SET name=?2, args_json=?3, cwd=?4, interpreter_path=?5, stop_timeout_sec=?6, enabled=?7, updated_at=?8 WHERE id=?1",
+        "UPDATE scripts SET name=?2, args_json=?3, cwd=?4, interpreter_path=?5, process_match=?6, stop_timeout_sec=?7, enabled=?8, updated_at=?9 WHERE id=?1",
         params![
             id,
             name,
             serde_json::to_string(args).unwrap_or_else(|_| "[]".into()),
             cwd,
             interpreter_path,
+            process_match,
             stop_timeout_sec.max(1),
             if enabled { 1 } else { 0 },
             now_ms(),

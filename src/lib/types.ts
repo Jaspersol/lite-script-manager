@@ -9,6 +9,7 @@ export interface Script {
   cwd: string | null;
   env: Record<string, string>;
   interpreter_path: string | null;
+  process_match: string | null;
   stop_timeout_sec: number;
   sort_order: number;
   enabled: boolean;

@@ -23,67 +23,106 @@ unsafe impl Send for JobHandle {}
 unsafe impl Sync for JobHandle {}
 
 #[cfg(windows)]
+fn create_job_object() -> Result<isize, String> {
+    use std::mem::zeroed;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    unsafe {
+        let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+        if job.is_null() {
+            return Err(format!(
+                "创建 Job Object 失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let ok = SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            &info as *const _ as *const core::ffi::c_void,
+            std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+        );
+        if ok == 0 {
+            CloseHandle(job);
+            return Err(format!(
+                "配置 Job Object 失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(job as isize)
+    }
+}
+
+#[cfg(windows)]
+fn assign_process_to_job(job: isize, pid: u32) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+    };
+
+    unsafe {
+        let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
+        if process.is_null() {
+            return Err(format!(
+                "打开子进程失败: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let assigned = AssignProcessToJobObject(job as _, process);
+        CloseHandle(process);
+        if assigned == 0 {
+            Err(format!(
+                "将子进程加入 Job Object 失败: {}",
+                std::io::Error::last_os_error()
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(windows)]
 impl JobHandle {
     fn raw(&self) -> windows_sys::Win32::Foundation::HANDLE {
         self.handle as windows_sys::Win32::Foundation::HANDLE
     }
 
     pub fn attach(pid: u32) -> Result<Self, String> {
-        use std::mem::zeroed;
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::JobObjects::{
-            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-            SetInformationJobObject,
-        };
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
-        };
-
-        unsafe {
-            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if job.is_null() {
-                return Err(format!(
-                    "创建 Job Object 失败: {}",
-                    std::io::Error::last_os_error()
-                ));
+        let handle = create_job_object()?;
+        if let Err(error) = assign_process_to_job(handle, pid) {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(
+                    handle as windows_sys::Win32::Foundation::HANDLE,
+                );
             }
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            let ok = SetInformationJobObject(
-                job,
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const core::ffi::c_void,
-                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-            );
-            if ok == 0 {
-                CloseHandle(job);
-                return Err(format!(
-                    "配置 Job Object 失败: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE, 0, pid);
-            if process.is_null() {
-                CloseHandle(job);
-                return Err(format!(
-                    "打开子进程失败: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            let assigned = AssignProcessToJobObject(job, process);
-            CloseHandle(process);
-            if assigned == 0 {
-                CloseHandle(job);
-                return Err(format!(
-                    "将子进程加入 Job Object 失败: {}",
-                    std::io::Error::last_os_error()
-                ));
-            }
-            Ok(Self {
-                handle: job as isize,
-            })
+            return Err(error);
         }
+        Ok(Self { handle })
+    }
+
+    pub fn attach_many(pids: &[u32]) -> Result<Self, String> {
+        let handle = create_job_object()?;
+        let mut assigned = 0usize;
+        for pid in pids {
+            if assign_process_to_job(handle, *pid).is_ok() {
+                assigned += 1;
+            }
+        }
+        if assigned == 0 {
+            unsafe {
+                windows_sys::Win32::Foundation::CloseHandle(
+                    handle as windows_sys::Win32::Foundation::HANDLE,
+                );
+            }
+            return Err("没有进程可以加入 Job Object".to_string());
+        }
+        Ok(Self { handle })
     }
 
     pub fn terminate(&self) {
@@ -227,6 +266,380 @@ fn resume_process(_pid: u32) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn process_command_line(pid: u32) -> Option<String> {
+    use std::mem::size_of;
+    use windows_sys::Wdk::System::Threading::{
+        NtQueryInformationProcess, ProcessCommandLineInformation,
+    };
+    use windows_sys::Win32::Foundation::{CloseHandle, UNICODE_STRING};
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        // Keep the buffer 8-byte aligned for UNICODE_STRING.
+        let mut buffer = vec![0u64; 8192];
+        let mut returned = 0u32;
+        let status = NtQueryInformationProcess(
+            process,
+            ProcessCommandLineInformation,
+            buffer.as_mut_ptr() as *mut core::ffi::c_void,
+            (buffer.len() * size_of::<u64>()) as u32,
+            &mut returned,
+        );
+        if status < 0 {
+            CloseHandle(process);
+            return None;
+        }
+        let unicode = &*(buffer.as_ptr() as *const UNICODE_STRING);
+        let chars = unicode.Length as usize / size_of::<u16>();
+        let limit = (buffer.len() * size_of::<u64>()) / size_of::<u16>();
+        let result = if unicode.Buffer.is_null() || chars == 0 || chars > limit {
+            None
+        } else {
+            Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+                unicode.Buffer,
+                chars,
+            )))
+        };
+        CloseHandle(process);
+        result
+    }
+}
+
+#[cfg(windows)]
+fn list_processes() -> Vec<(u32, u32, String, String)> {
+    use std::mem::{size_of, zeroed};
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+        TH32CS_SNAPPROCESS,
+    };
+
+    let mut processes = Vec::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return processes;
+        }
+        let mut entry: PROCESSENTRY32W = zeroed();
+        entry.dwSize = size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                let name_len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|ch| *ch == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let exe = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
+                let command_line = process_command_line(entry.th32ProcessID).unwrap_or_default();
+                processes.push((
+                    entry.th32ProcessID,
+                    entry.th32ParentProcessID,
+                    exe,
+                    command_line,
+                ));
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+    processes
+}
+
+#[cfg(not(windows))]
+fn list_processes() -> Vec<(u32, u32, String, String)> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            false
+        } else {
+            CloseHandle(handle);
+            true
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn process_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(windows)]
+fn terminate_process_trees(roots: &[u32]) {
+    use std::collections::{HashMap, HashSet};
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+
+    if roots.is_empty() {
+        return;
+    }
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (pid, parent, _exe, _command_line) in list_processes() {
+        children.entry(parent).or_default().push(pid);
+    }
+    let mut targets = HashSet::new();
+    let mut stack = roots.to_vec();
+    while let Some(pid) = stack.pop() {
+        if !targets.insert(pid) {
+            continue;
+        }
+        if let Some(kids) = children.get(&pid) {
+            stack.extend(kids);
+        }
+    }
+    let current = std::process::id();
+    for pid in targets {
+        if pid == current {
+            continue;
+        }
+        unsafe {
+            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+            if !handle.is_null() {
+                TerminateProcess(handle, 1);
+                CloseHandle(handle);
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn terminate_process_trees(_roots: &[u32]) {}
+
+fn normalized_match(value: &str) -> String {
+    let value = value.trim();
+    let value = value.strip_prefix(r"\\?\").unwrap_or(value);
+    value.replace('/', "\\").to_lowercase()
+}
+
+fn executable_allowed(script: &Script, exe: &str) -> bool {
+    let exe = exe.to_ascii_lowercase();
+    if let Some(spec) = runtime::find_spec(&script.runtime_id) {
+        if spec
+            .executables
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(&exe))
+        {
+            return true;
+        }
+    } else {
+        return true;
+    }
+    script
+        .interpreter_path
+        .as_deref()
+        .and_then(|path| std::path::Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.eq_ignore_ascii_case(&exe))
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn spawn_adopted_monitor(
+    app: AppHandle,
+    run_id: String,
+    script_id: String,
+    guard: Arc<JobHandle>,
+    stopped: Arc<AtomicBool>,
+    started_at: i64,
+    pids: Vec<u32>,
+) {
+    tauri::async_runtime::spawn(async move {
+        while guard.active_processes() > 0 || pids.iter().any(|pid| process_alive(*pid)) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let status = if stopped.load(Ordering::SeqCst) {
+            "stopped"
+        } else {
+            "exited"
+        };
+        let state = app.state::<AppState>();
+        if let Ok(conn) = state.db.lock() {
+            let _ = db::finish_run(&conn, &run_id, status, None, None);
+        }
+        if let Ok(mut runs) = state.runs.lock() {
+            runs.remove(&run_id);
+        }
+        let _ = app.emit(
+            "run-state",
+            RunStateEvent {
+                run_id,
+                script_id,
+                status: status.to_string(),
+                exit_code: None,
+                error: None,
+                started_at,
+                ended_at: Some(db::now_ms()),
+            },
+        );
+    });
+}
+
+#[cfg(windows)]
+pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
+    use std::collections::HashSet;
+
+    let state = app.state::<AppState>();
+    if state.adopting.swap(true, Ordering::SeqCst) {
+        return Ok(0);
+    }
+
+    let result = (|| -> Result<usize, String> {
+        let scripts = {
+            let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+            db::list_scripts(&conn)?
+        };
+        let processes = list_processes();
+        if processes.is_empty() {
+            return Ok(0);
+        }
+
+        let (mut managed_pids, managed_scripts) = {
+            let runs = state
+                .runs
+                .lock()
+                .map_err(|_| "运行状态锁失败".to_string())?;
+            let pids = runs.values().map(|run| run.pid).collect::<HashSet<_>>();
+            let scripts = runs
+                .values()
+                .map(|run| run.script_id.clone())
+                .collect::<HashSet<_>>();
+            (pids, scripts)
+        };
+
+        let current_pid = std::process::id();
+        let mut adopted = 0usize;
+        for script in scripts {
+            if managed_scripts.contains(&script.id) {
+                continue;
+            }
+
+            let pattern = script
+                .process_match
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let needle = match pattern {
+                Some(value) => normalized_match(value),
+                None => normalized_match(&script.path),
+            };
+            if needle.is_empty() {
+                continue;
+            }
+
+            let mut pids = Vec::new();
+            for (pid, _parent, exe, command_line) in &processes {
+                if *pid == current_pid || managed_pids.contains(pid) {
+                    continue;
+                }
+                if pattern.is_none() && !executable_allowed(&script, exe) {
+                    continue;
+                }
+                let haystack = normalized_match(&format!("{exe} {command_line}"));
+                if haystack.contains(&needle) {
+                    pids.push(*pid);
+                }
+            }
+            if pids.is_empty() {
+                continue;
+            }
+
+            let guard = match JobHandle::attach_many(&pids) {
+                Ok(guard) => Arc::new(guard),
+                Err(error) => {
+                    eprintln!("接管 {} 失败: {error}", script.name);
+                    continue;
+                }
+            };
+            let run_id = Uuid::new_v4().to_string();
+            let started_at = db::now_ms();
+            {
+                let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+                if let Err(error) = db::insert_run(
+                    &conn,
+                    &run_id,
+                    &script.id,
+                    pids.first().copied(),
+                    started_at,
+                    "",
+                ) {
+                    guard.terminate();
+                    eprintln!("接管 {} 写入运行记录失败: {error}", script.name);
+                    continue;
+                }
+            }
+
+            let stopped = Arc::new(AtomicBool::new(false));
+            let handle = RunHandle {
+                run_id: run_id.clone(),
+                script_id: script.id.clone(),
+                runtime_id: script.runtime_id.clone(),
+                pid: pids[0],
+                pids: pids.clone(),
+                guard: guard.clone(),
+                stopped: stopped.clone(),
+                started_at,
+                stop_timeout_sec: script.stop_timeout_sec.max(1),
+            };
+            {
+                let mut runs = state
+                    .runs
+                    .lock()
+                    .map_err(|_| "运行状态锁失败".to_string())?;
+                runs.insert(run_id.clone(), handle);
+            }
+            for pid in &pids {
+                managed_pids.insert(*pid);
+            }
+
+            let _ = app.emit(
+                "run-state",
+                RunStateEvent {
+                    run_id: run_id.clone(),
+                    script_id: script.id.clone(),
+                    status: "running".into(),
+                    exit_code: None,
+                    error: None,
+                    started_at,
+                    ended_at: None,
+                },
+            );
+            spawn_adopted_monitor(
+                app.clone(),
+                run_id,
+                script.id.clone(),
+                guard,
+                stopped,
+                started_at,
+                pids,
+            );
+            adopted += 1;
+        }
+        Ok(adopted)
+    })();
+
+    state.adopting.store(false, Ordering::SeqCst);
+    result
+}
+
+#[cfg(not(windows))]
+pub fn adopt_external(_app: &AppHandle) -> Result<usize, String> {
+    Ok(0)
+}
+
 #[cfg(unix)]
 pub struct JobHandle {
     pgid: i32,
@@ -261,6 +674,7 @@ pub struct RunHandle {
     pub script_id: String,
     pub runtime_id: String,
     pub pid: u32,
+    pub pids: Vec<u32>,
     pub guard: Arc<JobHandle>,
     pub stopped: Arc<AtomicBool>,
     pub started_at: i64,
@@ -505,6 +919,7 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
         script_id: script.id.clone(),
         runtime_id: script.runtime_id.clone(),
         pid,
+        pids: vec![pid],
         guard: guard.clone(),
         stopped: stopped.clone(),
         started_at,
@@ -654,6 +1069,7 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
         // run from state as soon as it finishes; only surviving runs are forced.
         let app_for_timer = app.clone();
         let guard = handle.guard.clone();
+        let pids = handle.pids.clone();
         let run_id = handle.run_id.clone();
         let timeout = handle.stop_timeout_sec.max(1) as u64;
         tauri::async_runtime::spawn(async move {
@@ -666,6 +1082,7 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
                 .unwrap_or(false);
             if still_running {
                 guard.terminate();
+                terminate_process_trees(&pids);
             }
         });
     }
@@ -682,6 +1099,7 @@ pub fn stop_all(app: &AppHandle) {
     for handle in handles {
         handle.stopped.store(true, Ordering::SeqCst);
         handle.guard.terminate();
+        terminate_process_trees(&handle.pids);
     }
 }
 

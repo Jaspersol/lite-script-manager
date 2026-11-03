@@ -12,6 +12,7 @@ pub struct AppState {
     pub data_dir: PathBuf,
     pub runtime_cache: Mutex<Option<(std::time::Instant, Vec<RuntimeInfo>)>>,
     pub exiting: AtomicBool,
+    pub adopting: AtomicBool,
 }
 
 impl AppState {
@@ -22,6 +23,7 @@ impl AppState {
             data_dir,
             runtime_cache: Mutex::new(None),
             exiting: AtomicBool::new(false),
+            adopting: AtomicBool::new(false),
         }
     }
 }

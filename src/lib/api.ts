@@ -8,14 +8,15 @@ export const api = {
   createFromPath: (path: string) => invoke<Script>("create_script_from_path", { path }),
   createNew: (name: string, runtimeId: string, content: string) =>
     invoke<Script>("create_new_script", { name, runtimeId, content }),
-  updateScript: (id: string, name: string, args: string[], cwd: string | null, interpreterPath: string | null, stopTimeoutSec: number, enabled: boolean) =>
-    invoke<Script>("update_script", { id, name, args, cwd, interpreterPath, stopTimeoutSec, enabled }),
+  updateScript: (id: string, name: string, args: string[], cwd: string | null, interpreterPath: string | null, processMatch: string | null, stopTimeoutSec: number, enabled: boolean) =>
+    invoke<Script>("update_script", { id, name, args, cwd, interpreterPath, processMatch, stopTimeoutSec, enabled }),
   deleteScript: (id: string, deleteFile = false) =>
     invoke<void>("delete_script", { id, deleteFile }),
   reorderScripts: (ids: string[]) => invoke<void>("reorder_scripts", { ids }),
   runScript: (id: string) => invoke<unknown>("run_script", { id }),
   stopScript: (id: string) => invoke<void>("stop_script", { id }),
   stopAllScripts: () => invoke<void>("stop_all_scripts"),
+  adoptExternalRuns: () => invoke<number>("adopt_external_runs"),
   closePanel: () => invoke<void>("close_panel"),
   showMain: () => invoke<void>("show_main"),
   getRunLog: (runId: string, maxLines = 400) =>
