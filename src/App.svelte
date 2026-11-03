@@ -39,7 +39,7 @@
     }),
   );
 
-  const runningCount = $derived(scripts.filter((s) => isBusy(s)).length);
+  const runningCount = $derived(scripts.filter((s) => s.status === "running" || s.status === "starting").length);
 
   function runtimeName(id: string): string {
     return catalog.find((item) => item.id === id)?.name ?? id;

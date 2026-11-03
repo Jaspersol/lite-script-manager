@@ -92,6 +92,26 @@ impl JobHandle {
         }
     }
 
+    pub fn active_processes(&self) -> u32 {
+        use std::mem::{size_of, zeroed};
+        use windows_sys::Win32::System::JobObjects::{
+            JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+            QueryInformationJobObject,
+        };
+
+        unsafe {
+            let mut info: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = zeroed();
+            let ok = QueryInformationJobObject(
+                self.raw(),
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut core::ffi::c_void,
+                size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            );
+            if ok == 0 { 0 } else { info.ActiveProcesses }
+        }
+    }
+
     pub fn request_graceful(&self, pid: u32, runtime_id: &str) {
         if matches!(runtime_id, "autohotkey" | "autoit") {
             post_wm_close(pid);
@@ -222,6 +242,10 @@ impl JobHandle {
         unsafe {
             libc::kill(-self.pgid, libc::SIGKILL);
         }
+    }
+
+    pub fn active_processes(&self) -> u32 {
+        unsafe { if libc::kill(-self.pgid, 0) == 0 { 1 } else { 0 } }
     }
 
     pub fn request_graceful(&self, _pid: u32, _runtime_id: &str) {
@@ -533,6 +557,7 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
     let run_id_for_wait = run_id.clone();
     let script_id_for_wait = script.id.clone();
     let stopped_for_wait = stopped.clone();
+    let guard_for_wait = guard.clone();
     tauri::async_runtime::spawn(async move {
         let wait_result = child.wait().await;
         let was_stopped = stopped_for_wait.load(Ordering::SeqCst);
@@ -540,6 +565,14 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
             Ok(status) => (status.code(), None),
             Err(error) => (None, Some(format!("等待进程结束失败: {error}"))),
         };
+
+        // A launcher can spawn a long-lived child and exit immediately. Keep the
+        // run alive until the whole Job Object is empty so that the spawned
+        // process is still visible and stoppable from the UI.
+        while guard_for_wait.active_processes() > 0 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
         let final_status = if was_stopped {
             "stopped"
         } else if exit_code == Some(0) {
