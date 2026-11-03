@@ -62,7 +62,7 @@ The app starts in the system tray without opening a window.
 npm run tauri build
 ```
 
-The Windows MSI installer is written under `src-tauri/target/release/bundle/msi/`. A release executable without an installer can be built with:
+The Windows NSIS installer (`*-setup.exe`) is written under `src-tauri/target/release/bundle/nsis/`. It installs per user without administrator rights. A release executable without an installer can be built with:
 
 ```bash
 npx tauri build --no-bundle
@@ -101,5 +101,5 @@ Run history stores log paths and sizes, not log bodies. Log files are pruned by 
 - External process monitoring uses a 1-second snapshot diff by default. Very short-lived processes may be missed. ETW/WMI low-latency mode is not included because it requires administrator setup.
 - Network metrics are not sampled in the first version.
 - The UI is currently Chinese; the language preference is stored for future localization.
-- Code signing, auto-update, and NSIS are optional release work and are not configured. The standalone release executable can be copied as a portable build.
+- Code signing and auto-update are optional release work and are not configured. The NSIS installer is configured for per-user installation; the standalone release executable can be copied as a portable build.
 - The application must remain running in the tray for schedules and triggers to fire. Running while signed out would require a Windows service and is out of scope.
