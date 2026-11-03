@@ -1,10 +1,12 @@
-use crate::models::RuntimeInfo;
+use crate::models::{LifecycleEvent, RuntimeInfo};
 use crate::runner::RunHandle;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use tokio::sync::{Notify, broadcast};
 
 pub struct AppState {
     pub db: Mutex<Connection>,
@@ -13,10 +15,16 @@ pub struct AppState {
     pub runtime_cache: Mutex<Option<(std::time::Instant, Vec<RuntimeInfo>)>>,
     pub exiting: AtomicBool,
     pub adopting: AtomicBool,
+    pub ui_visible: AtomicBool,
+    pub log_streaming: AtomicBool,
+    pub lifecycle_tx: broadcast::Sender<LifecycleEvent>,
+    pub scheduler_wake: Arc<Notify>,
+    pub trigger_wake: Arc<Notify>,
 }
 
 impl AppState {
     pub fn new(db: Connection, data_dir: PathBuf) -> Self {
+        let (lifecycle_tx, _) = broadcast::channel(256);
         Self {
             db: Mutex::new(db),
             runs: Mutex::new(HashMap::new()),
@@ -24,6 +32,11 @@ impl AppState {
             runtime_cache: Mutex::new(None),
             exiting: AtomicBool::new(false),
             adopting: AtomicBool::new(false),
+            ui_visible: AtomicBool::new(false),
+            log_streaming: AtomicBool::new(false),
+            lifecycle_tx,
+            scheduler_wake: Arc::new(Notify::new()),
+            trigger_wake: Arc::new(Notify::new()),
         }
     }
 }

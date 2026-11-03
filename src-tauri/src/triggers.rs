@@ -1,0 +1,652 @@
+use crate::db;
+use crate::logging;
+use crate::metrics::{self, CpuSampler, SystemMetrics};
+use crate::models::{LifecycleEvent, StartOptions, Trigger};
+use crate::runner;
+use crate::settings;
+use crate::state::AppState;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_notification::NotificationExt;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct Condition {
+    #[serde(default)]
+    metric: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    value: f64,
+    #[serde(default)]
+    for_sec: i64,
+    #[serde(default)]
+    hysteresis: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct TriggerConfig {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    parent: String,
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    metric: String,
+    #[serde(default)]
+    op: String,
+    #[serde(default)]
+    value: f64,
+    #[serde(default)]
+    for_sec: i64,
+    #[serde(default)]
+    hysteresis: f64,
+    #[serde(default)]
+    conditions: Vec<Condition>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ActionSpec {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    script_id: String,
+    #[serde(default)]
+    trigger_id: String,
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ProcessMeta {
+    pid: u32,
+    name: String,
+    parent: u32,
+    created_ms: i64,
+    path: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct ConditionState {
+    since: i64,
+    active: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct CpuHistory {
+    last_cpu_ms: u64,
+    last_at: i64,
+    percent: f64,
+}
+
+pub fn wake(app: &AppHandle) {
+    app.state::<AppState>().trigger_wake.notify_waiters();
+}
+
+fn parse_config(trigger: &Trigger) -> TriggerConfig {
+    serde_json::from_str(&trigger.config_json).unwrap_or_default()
+}
+
+fn parse_actions(trigger: &Trigger) -> Vec<ActionSpec> {
+    serde_json::from_str(&trigger.actions_json).unwrap_or_default()
+}
+
+fn load_triggers(app: &AppHandle) -> Vec<Trigger> {
+    let state = app.state::<AppState>();
+    let Ok(conn) = state.db.lock() else {
+        return Vec::new();
+    };
+    db::list_triggers(&conn)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|trigger| trigger.enabled)
+        .collect()
+}
+
+fn lower(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+fn enrich(meta: &mut ProcessMeta) {
+    if meta.path.is_some() {
+        return;
+    }
+    if let Some(command) = runner::process_command_line(meta.pid) {
+        meta.path = Some(command);
+    }
+}
+
+fn process_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str) -> bool {
+    if !config.name.trim().is_empty() && lower(&config.name) != lower(&meta.name) {
+        return false;
+    }
+    if !config.parent.trim().is_empty() && lower(&config.parent) != lower(parent_name) {
+        return false;
+    }
+    if config.path.trim().is_empty() && config.command.trim().is_empty() {
+        return true;
+    }
+    let Some(text) = meta.path.as_deref() else {
+        return false;
+    };
+    let text = lower(text);
+    if !config.path.trim().is_empty() && !text.contains(&lower(&config.path)) {
+        return false;
+    }
+    if !config.command.trim().is_empty() && !text.contains(&lower(&config.command)) {
+        return false;
+    }
+    true
+}
+
+fn compare(metric: f64, op: &str, value: f64) -> bool {
+    match op {
+        ">" => metric > value,
+        ">=" => metric >= value,
+        "<" => metric < value,
+        "<=" => metric <= value,
+        "==" | "=" => (metric - value).abs() < f64::EPSILON,
+        "!=" => (metric - value).abs() >= f64::EPSILON,
+        _ => false,
+    }
+}
+
+fn condition_exit(metric: f64, condition: &Condition) -> bool {
+    let hysteresis = condition.hysteresis.max(0.0);
+    match condition.op.as_str() {
+        ">" | ">=" => metric < condition.value - hysteresis,
+        "<" | "<=" => metric > condition.value + hysteresis,
+        _ => !compare(metric, &condition.op, condition.value),
+    }
+}
+
+fn process_pids(
+    config: &TriggerConfig,
+    snapshot: &HashMap<u32, ProcessMeta>,
+    parent_names: &HashMap<u32, String>,
+) -> Vec<u32> {
+    let mut values = Vec::new();
+    for (pid, meta) in snapshot {
+        let parent = parent_names
+            .get(&meta.parent)
+            .map(String::as_str)
+            .unwrap_or("");
+        if process_matches(config, meta, parent) {
+            values.push(*pid);
+        }
+    }
+    values
+}
+
+fn resource_value(
+    condition: &Condition,
+    config: &TriggerConfig,
+    system: &SystemMetrics,
+    snapshot: &HashMap<u32, ProcessMeta>,
+    parent_names: &HashMap<u32, String>,
+    cpu_history: &mut CpuHistory,
+) -> Option<f64> {
+    match condition.metric.as_str() {
+        "system.cpu" => Some(system.cpu_percent),
+        "system.memory" => Some(system.memory_percent),
+        "system.process_count" | "process.count" => Some(system.process_count as f64),
+        "disk.free_gb" => Some(system.disk_free_bytes as f64 / 1024.0 / 1024.0 / 1024.0),
+        "process.memory" | "process.memory_mb" => {
+            let pids = process_pids(config, snapshot, parent_names);
+            let value = metrics::process_metrics(&pids).memory_bytes;
+            Some(if condition.metric.ends_with("_mb") {
+                value as f64 / 1024.0 / 1024.0
+            } else {
+                value as f64
+            })
+        }
+        "process.cpu" => {
+            let pids = process_pids(config, snapshot, parent_names);
+            let sample = metrics::process_metrics(&pids);
+            let now = db::now_ms();
+            let elapsed = now.saturating_sub(cpu_history.last_at).max(1) as f64;
+            let cores = std::thread::available_parallelism()
+                .map(|value| value.get() as f64)
+                .unwrap_or(1.0);
+            let delta = sample.cpu_time_ms.saturating_sub(cpu_history.last_cpu_ms) as f64;
+            cpu_history.percent = if cpu_history.last_at == 0 {
+                0.0
+            } else {
+                (delta / (elapsed * cores)) * 100.0
+            };
+            cpu_history.last_cpu_ms = sample.cpu_time_ms;
+            cpu_history.last_at = now;
+            Some(cpu_history.percent)
+        }
+        _ => None,
+    }
+}
+
+fn effective_conditions(config: &TriggerConfig) -> Vec<Condition> {
+    if !config.conditions.is_empty() {
+        config.conditions.clone()
+    } else if !config.metric.is_empty() {
+        vec![Condition {
+            metric: config.metric.clone(),
+            op: config.op.clone(),
+            value: config.value,
+            for_sec: config.for_sec,
+            hysteresis: config.hysteresis,
+        }]
+    } else {
+        Vec::new()
+    }
+}
+
+fn notify(app: &AppHandle, title: &str, message: &str) {
+    let title = if title.trim().is_empty() {
+        "LiteScriptManager"
+    } else {
+        title
+    };
+    let _ = app
+        .notification()
+        .builder()
+        .title(title)
+        .body(message)
+        .show();
+    let _ = app.emit(
+        "app-notification",
+        serde_json::json!({ "title": title, "message": message }),
+    );
+}
+
+pub fn fire_manual(app: &AppHandle, trigger_id: &str) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let trigger = {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::get_trigger(&conn, trigger_id)?.ok_or_else(|| "触发器不存在".to_string())?
+    };
+    fire_trigger(app, &trigger, "manual")
+}
+
+fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    if let Some(conn) = state.db.lock().ok() {
+        if let Ok(Some(current)) = db::get_trigger(&conn, &trigger.id) {
+            if !current.enabled && event != "manual" {
+                return Ok("disabled".into());
+            }
+            if event != "manual"
+                && current.cooldown_sec > 0
+                && current.last_triggered_at.is_some_and(|last| {
+                    db::now_ms().saturating_sub(last) < current.cooldown_sec * 1000
+                })
+            {
+                return Ok("cooldown".into());
+            }
+        }
+    }
+
+    let actions = parse_actions(trigger);
+    let mut results = Vec::new();
+    for action in actions {
+        let result = match action.kind.as_str() {
+            "run_script" => run_action_script(app, &action, trigger, false),
+            "stop_script" => runner::stop(app, &action.script_id)
+                .map(|_| "stopped".to_string())
+                .map_err(|error| error),
+            "restart_script" => run_action_script(app, &action, trigger, true),
+            "enable_trigger" | "disable_trigger" => {
+                let enabled = action.kind == "enable_trigger";
+                let state = app.state::<AppState>();
+                match state.db.lock() {
+                    Ok(conn) => {
+                        db::set_trigger_enabled(&conn, &action.trigger_id, enabled).map(|_| {
+                            format!("trigger {}", if enabled { "enabled" } else { "disabled" })
+                        })
+                    }
+                    Err(_) => Err("数据库锁失败".into()),
+                }
+            }
+            "notify" => {
+                notify(
+                    app,
+                    if action.title.is_empty() {
+                        &trigger.name
+                    } else {
+                        &action.title
+                    },
+                    if action.message.is_empty() {
+                        "触发器已触发"
+                    } else {
+                        &action.message
+                    },
+                );
+                Ok("notified".into())
+            }
+            other => Err(format!("未知动作: {other}")),
+        };
+        match result {
+            Ok(value) => results.push(format!("{}={value}", action.kind)),
+            Err(error) => {
+                logging::app_log(
+                    "ERROR",
+                    &format!("触发器 {} 动作 {} 失败: {error}", trigger.name, action.kind),
+                );
+                results.push(format!("{}={error}", action.kind));
+            }
+        }
+    }
+    if results.is_empty() {
+        results.push("no action".into());
+    }
+    let result = results.join("; ");
+    if let Ok(conn) = state.db.lock() {
+        let _ = db::record_trigger_event(
+            &conn,
+            &Uuid::new_v4().to_string(),
+            &trigger.id,
+            event,
+            &result,
+        );
+    }
+    let _ = app.emit("triggers-changed", ());
+    let _ = app.emit(
+        "trigger-fired",
+        serde_json::json!({
+            "trigger_id": trigger.id,
+            "trigger_name": trigger.name,
+            "event": event,
+            "result": result
+        }),
+    );
+    Ok(result)
+}
+
+fn run_action_script(
+    app: &AppHandle,
+    action: &ActionSpec,
+    trigger: &Trigger,
+    restart: bool,
+) -> Result<String, String> {
+    let state = app.state::<AppState>();
+    let script = {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::get_script(&conn, &action.script_id)?.ok_or_else(|| "动作脚本不存在".to_string())?
+    };
+    let options = StartOptions {
+        source: "trigger".into(),
+        source_id: Some(trigger.id.clone()),
+        timeout_sec: script.timeout_sec,
+        success_codes: script.success_codes.clone(),
+        overlap_policy: if restart {
+            "replace".into()
+        } else {
+            "skip".into()
+        },
+    };
+    let event = runner::start_with(app, script, options)?;
+    Ok(if restart {
+        format!("restarted {}", event.run_id)
+    } else {
+        format!("started {}", event.run_id)
+    })
+}
+
+fn fire_process_matches(
+    app: &AppHandle,
+    triggers: &[Trigger],
+    event_type: &str,
+    current: &HashMap<u32, ProcessMeta>,
+    previous: &HashMap<u32, ProcessMeta>,
+    parent_names: &HashMap<u32, String>,
+) {
+    let ids = if event_type == "process_started" {
+        current
+            .keys()
+            .filter(|pid| !previous.contains_key(pid))
+            .copied()
+            .collect::<Vec<_>>()
+    } else {
+        previous
+            .keys()
+            .filter(|pid| !current.contains_key(pid))
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    for pid in ids {
+        let Some(meta) = (if event_type == "process_started" {
+            current.get(&pid)
+        } else {
+            previous.get(&pid)
+        }) else {
+            continue;
+        };
+        let mut meta = meta.clone();
+        let parent = parent_names.get(&meta.parent).cloned().unwrap_or_default();
+        for trigger in triggers {
+            if trigger.event_type != event_type {
+                continue;
+            }
+            let config = parse_config(trigger);
+            if !(config.path.trim().is_empty() && config.command.trim().is_empty())
+                && meta.path.is_none()
+            {
+                enrich(&mut meta);
+            }
+            if process_matches(&config, &meta, &parent) {
+                if let Err(error) =
+                    fire_trigger(app, trigger, &format!("{event_type}:{}:{}", meta.name, pid))
+                {
+                    logging::app_log("ERROR", &format!("触发器执行失败: {error}"));
+                }
+            }
+        }
+    }
+}
+
+fn fire_script_event(app: &AppHandle, triggers: &[Trigger], event: &LifecycleEvent) {
+    let event_type = if matches!(event.status.as_str(), "running" | "starting") {
+        "script_started"
+    } else {
+        "script_exited"
+    };
+    for trigger in triggers {
+        if trigger.event_type == event_type {
+            let _ = fire_trigger(
+                app,
+                trigger,
+                &format!("{event_type}:{}:{}", event.script_id, event.status),
+            );
+        }
+    }
+}
+
+fn monitor_loop(app: AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        let mut previous: Option<HashMap<u32, ProcessMeta>> = None;
+        let mut conditions: HashMap<String, ConditionState> = HashMap::new();
+        let mut cpu: HashMap<String, CpuHistory> = HashMap::new();
+        let mut sampler = CpuSampler::default();
+        let state = app.state::<AppState>();
+        let mut lifecycle = state.lifecycle_tx.subscribe();
+        loop {
+            let triggers = load_triggers(&app);
+            if triggers.is_empty() {
+                previous = None;
+                tokio::select! {
+                    _ = state.trigger_wake.notified() => {}
+                    _ = lifecycle.recv() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                }
+                continue;
+            }
+            let interval = {
+                let conn = state.db.lock().ok();
+                conn.map(|conn| settings::get_i64(&conn, "monitor_interval_ms", 1000))
+                    .unwrap_or(1000)
+                    .clamp(250, 60_000)
+            };
+            tokio::select! {
+                _ = state.trigger_wake.notified() => {}
+                event = lifecycle.recv() => {
+                    if let Ok(event) = event {
+                        fire_script_event(&app, &triggers, &event);
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(interval as u64)) => {}
+            }
+
+            let raw = runner::snapshot_processes();
+            let parent_names = raw
+                .iter()
+                .map(|(pid, _parent, name)| (*pid, name.clone()))
+                .collect::<HashMap<_, _>>();
+            let previous_for_meta = previous.clone();
+            let mut current = raw
+                .iter()
+                .map(|(pid, parent, name)| {
+                    let created_ms = previous_for_meta
+                        .as_ref()
+                        .and_then(|values| values.get(pid))
+                        .map(|value| value.created_ms)
+                        .unwrap_or(0);
+                    (
+                        *pid,
+                        ProcessMeta {
+                            pid: *pid,
+                            name: name.clone(),
+                            parent: *parent,
+                            created_ms,
+                            path: None,
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            for (pid, meta) in &mut current {
+                if meta.created_ms == 0 {
+                    meta.created_ms = runner::process_create_time_ms(*pid).unwrap_or(0);
+                }
+            }
+            if let Some(previous) = previous.clone() {
+                fire_process_matches(
+                    &app,
+                    &triggers,
+                    "process_started",
+                    &current,
+                    &previous,
+                    &parent_names,
+                );
+                fire_process_matches(
+                    &app,
+                    &triggers,
+                    "process_exited",
+                    &current,
+                    &previous,
+                    &parent_names,
+                );
+            }
+            // Keep cached command lines for processes that are still alive.
+            if let Some(previous) = previous.as_ref() {
+                for (pid, meta) in &mut current {
+                    if let Some(old) = previous.get(pid) {
+                        meta.path = old.path.clone();
+                    }
+                }
+            }
+            previous = Some(current.clone());
+
+            let resource_triggers = triggers
+                .iter()
+                .filter(|trigger| {
+                    matches!(
+                        trigger.event_type.as_str(),
+                        "resource_enter" | "resource_exit"
+                    )
+                })
+                .collect::<Vec<_>>();
+            if resource_triggers.is_empty() {
+                continue;
+            }
+            let system = metrics::system_metrics(&mut sampler);
+            let now = db::now_ms();
+            for trigger in resource_triggers {
+                let config = parse_config(trigger);
+                let values = effective_conditions(&config);
+                if values.is_empty() {
+                    continue;
+                }
+                let mut all_true = true;
+                let mut all_exit = true;
+                let mut armed = true;
+                for condition in &values {
+                    let Some(value) = resource_value(
+                        condition,
+                        &config,
+                        &system,
+                        &current,
+                        &parent_names,
+                        cpu.entry(trigger.id.clone()).or_default(),
+                    ) else {
+                        all_true = false;
+                        all_exit = true;
+                        break;
+                    };
+                    let true_now = compare(value, &condition.op, condition.value);
+                    let exited = condition_exit(value, condition);
+                    all_true &= true_now;
+                    all_exit &= exited;
+                    let entry = conditions.entry(trigger.id.clone()).or_default();
+                    if entry.since == 0 && true_now {
+                        entry.since = now;
+                    }
+                    if !true_now {
+                        entry.since = 0;
+                    }
+                    if entry.since > 0 && now - entry.since < condition.for_sec * 1000 {
+                        armed = false;
+                    }
+                }
+                let entry = conditions.entry(trigger.id.clone()).or_default();
+                if trigger.event_type == "resource_enter" {
+                    if all_true && armed && !entry.active {
+                        entry.active = true;
+                        let result = fire_trigger(
+                            &app,
+                            trigger,
+                            &format!("resource_enter:{}", config.metric),
+                        );
+                        if let Err(error) = result {
+                            logging::app_log("ERROR", &format!("资源触发器失败: {error}"));
+                        }
+                    } else if !all_true && !all_exit {
+                        entry.active = false;
+                        entry.since = 0;
+                    }
+                } else {
+                    if all_true && armed && !entry.active {
+                        entry.active = true;
+                    }
+                    if entry.active && all_exit {
+                        entry.active = false;
+                        entry.since = 0;
+                        let _ = fire_trigger(
+                            &app,
+                            trigger,
+                            &format!("resource_exit:{}", config.metric),
+                        );
+                    }
+                }
+            }
+            let _ = current;
+        }
+    });
+}
+
+pub fn start(app: &AppHandle) {
+    monitor_loop(app.clone());
+    wake(app);
+}

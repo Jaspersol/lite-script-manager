@@ -412,6 +412,12 @@ fn candidates_for(spec: &RuntimeSpec) -> Vec<PathBuf> {
         }
     }
 
+    if spec.id == "python" {
+        for path in python_launcher_candidates() {
+            push_candidate(&mut paths, path);
+        }
+    }
+
     // Registry entries and typical installer directories cover processes launched
     // from a GUI where the user PATH may not include the runtime.
     for path in registry_candidates(spec) {
@@ -428,6 +434,239 @@ fn candidates_for(spec: &RuntimeSpec) -> Vec<PathBuf> {
     }
 
     paths
+}
+
+#[cfg(windows)]
+fn python_launcher_candidates() -> Vec<PathBuf> {
+    let Some(launcher) = which::which("py.exe").or_else(|_| which::which("py")).ok() else {
+        return Vec::new();
+    };
+    let Some((stdout, _)) = run_capture(&launcher, &["-0p"], Duration::from_millis(1500)) else {
+        return Vec::new();
+    };
+    let Ok(regex) = Regex::new(r"(?i)([A-Z]:\\[^\r\n]*?python(?:w)?\.exe)") else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for captures in regex.captures_iter(&stdout) {
+        if let Some(path) = captures.get(1) {
+            push_candidate(&mut paths, PathBuf::from(path.as_str().trim()));
+        }
+    }
+    paths
+}
+
+#[cfg(not(windows))]
+fn python_launcher_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn python_gui_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut values = Vec::new();
+    for path in paths {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("python.exe"))
+        {
+            if let Some(parent) = path.parent() {
+                push_candidate(&mut values, parent.join("pythonw.exe"));
+            }
+        }
+    }
+    values
+}
+
+#[cfg(windows)]
+fn wsl_distros() -> Vec<String> {
+    let Ok(output) = Command::new("wsl.exe")
+        .args(["-l", "-q"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    crate::logging::decode_output(&output.stdout)
+        .lines()
+        .map(|line| line.trim().trim_matches('\0').to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn wsl_distros() -> Vec<String> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn wsh_disabled() -> Option<String> {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        let root = RegKey::predef(hive);
+        for key_path in [
+            "SOFTWARE\\Microsoft\\Windows Script Host\\Settings",
+            "SOFTWARE\\Policies\\Microsoft\\Windows Script Host\\Settings",
+        ] {
+            if let Ok(key) = root.open_subkey_with_flags(key_path, KEY_READ) {
+                if let Ok(enabled) = key.get_value::<u32, _>("Enabled") {
+                    if enabled == 0 {
+                        return Some(format!("WSH 已被注册表策略禁用 ({key_path})"));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(windows))]
+fn wsh_disabled() -> Option<String> {
+    None
+}
+
+#[cfg(windows)]
+fn path_details() -> Vec<String> {
+    use winreg::RegKey;
+    use winreg::enums::KEY_WOW64_64KEY;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    let mut details = Vec::new();
+    if let Ok(path) = std::env::var("PATH") {
+        details.push(format!(
+            "当前进程 PATH: {} 项",
+            path.split(';')
+                .filter(|value| !value.trim().is_empty())
+                .count()
+        ));
+    }
+    let root = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(environment) = root.open_subkey_with_flags("Environment", KEY_READ) {
+        if let Ok(value) = environment.get_value::<String, _>("Path") {
+            details.push(format!(
+                "用户 PATH: {} 项",
+                value
+                    .split(';')
+                    .filter(|item| !item.trim().is_empty())
+                    .count()
+            ));
+        }
+    }
+    let root = RegKey::predef(HKEY_LOCAL_MACHINE);
+    if let Ok(environment) = root.open_subkey_with_flags(
+        "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment",
+        KEY_READ | KEY_WOW64_64KEY,
+    ) {
+        if let Ok(value) = environment.get_value::<String, _>("Path") {
+            details.push(format!(
+                "系统 PATH: {} 项",
+                value
+                    .split(';')
+                    .filter(|item| !item.trim().is_empty())
+                    .count()
+            ));
+        }
+    }
+    details
+}
+
+#[cfg(not(windows))]
+fn path_details() -> Vec<String> {
+    Vec::new()
+}
+
+fn candidate_source(path: &Path, spec: &RuntimeSpec) -> String {
+    if spec.id == "python"
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("py.exe"))
+    {
+        return "py launcher".into();
+    }
+    if let Ok(path_value) = std::env::var("PATH") {
+        let key = path.to_string_lossy().to_lowercase();
+        if path_value
+            .split(';')
+            .any(|root| key.starts_with(&root.trim().to_lowercase()))
+        {
+            return "PATH".into();
+        }
+    }
+    if path
+        .to_string_lossy()
+        .to_lowercase()
+        .contains("\\program files")
+    {
+        return "installer".into();
+    }
+    "auto".into()
+}
+
+fn candidate_kind(path: &Path) -> String {
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.contains("pythonw") {
+        "gui".into()
+    } else if name.starts_with("wsl") {
+        "wsl".into()
+    } else {
+        "console".into()
+    }
+}
+
+fn signature_for(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| {
+            let metadata = std::fs::metadata(path).ok();
+            let len = metadata.as_ref().map(|value| value.len()).unwrap_or(0);
+            let modified = metadata
+                .and_then(|value| value.modified().ok())
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_secs())
+                .unwrap_or(0);
+            format!("{}|{len}|{modified}", path.to_string_lossy())
+        })
+        .collect::<Vec<_>>()
+        .join("\u{1f}")
+}
+
+pub fn cached_signature_valid(info: &RuntimeInfo) -> bool {
+    if !info.installed {
+        return true;
+    }
+    if info.signature.is_empty() {
+        return true;
+    }
+    info.signature
+        .split('\u{1f}')
+        .filter(|entry| !entry.is_empty())
+        .all(|entry| {
+            let mut parts = entry.rsplitn(3, '|');
+            let modified = parts.next().and_then(|value| value.parse::<u64>().ok());
+            let len = parts.next().and_then(|value| value.parse::<u64>().ok());
+            let path = parts.next();
+            let (Some(path), Some(len), Some(modified)) = (path, len, modified) else {
+                return true;
+            };
+            let Ok(metadata) = std::fs::metadata(path) else {
+                return false;
+            };
+            let current_modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_secs())
+                .unwrap_or(0);
+            metadata.len() == len && current_modified == modified
+        })
 }
 
 fn venv_candidates(spec: &RuntimeSpec, script_path: Option<&str>) -> Vec<PathBuf> {
@@ -481,7 +720,33 @@ pub fn resolve_executable(
         }
     }
 
-    if let Some(path) = candidates_for(spec).into_iter().next() {
+    let candidates = candidates_for(spec);
+    if spec.id == "autohotkey" {
+        if let Some(script_path) = script_path {
+            let requires_v2 = std::fs::read(script_path)
+                .ok()
+                .and_then(|bytes| String::from_utf8(bytes.into_iter().take(8192).collect()).ok())
+                .is_some_and(|text| {
+                    text.lines()
+                        .find(|line| line.trim_start().starts_with("#Requires"))
+                        .is_some_and(|line| line.to_ascii_lowercase().contains("v2"))
+                });
+            for path in &candidates {
+                let version = probe_version(path, spec);
+                let is_v2 = version
+                    .as_deref()
+                    .is_some_and(|value| value.starts_with('2'));
+                if is_v2 == requires_v2 {
+                    return Ok(path.clone());
+                }
+            }
+            if requires_v2 {
+                return Err("#Requires AutoHotkey v2，但没有找到 v2 解释器".into());
+            }
+        }
+    }
+
+    if let Some(path) = candidates.into_iter().next() {
         return Ok(path);
     }
 
@@ -529,8 +794,8 @@ fn run_capture(exe: &Path, args: &[&str], timeout: Duration) -> Option<(String, 
 
     let _ = status;
     Some((
-        String::from_utf8_lossy(&stdout_bytes).into_owned(),
-        String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        crate::logging::decode_output(&stdout_bytes),
+        crate::logging::decode_output(&stderr_bytes),
     ))
 }
 
@@ -609,6 +874,11 @@ fn probe_version(exe: &Path, spec: &RuntimeSpec) -> Option<String> {
 
 pub fn detect_one(spec: &RuntimeSpec) -> RuntimeInfo {
     let paths = candidates_for(spec);
+    let gui_paths = if spec.id == "python" {
+        python_gui_paths(&paths)
+    } else {
+        Vec::new()
+    };
     let mut candidates = Vec::new();
     let mut first_version = None;
 
@@ -624,22 +894,84 @@ pub fn detect_one(spec: &RuntimeSpec) -> RuntimeInfo {
         candidates.push(RuntimeCandidate {
             path: path.display().to_string(),
             version,
+            source: candidate_source(path, spec),
+            kind: candidate_kind(path),
+        });
+    }
+    for (index, path) in gui_paths.iter().enumerate() {
+        candidates.push(RuntimeCandidate {
+            path: path.display().to_string(),
+            version: if index < 2 {
+                probe_version(path, spec)
+            } else {
+                None
+            },
+            source: candidate_source(path, spec),
+            kind: "gui".into(),
         });
     }
 
     let exe_path = paths.first().map(|path| path.display().to_string());
     let version = first_version.or_else(|| {
         candidates
-            .first()
+            .iter()
+            .find(|candidate| candidate.kind != "gui")
             .and_then(|candidate| candidate.version.clone())
     });
-    let status = if paths.is_empty() {
+
+    let mut details = Vec::new();
+    if spec.id == "python" {
+        if candidates.iter().any(|candidate| candidate.kind == "gui") {
+            details.push("python.exe 用于控制台脚本，pythonw.exe 仅作为 GUI 候选展示".into());
+        }
+        if candidates
+            .iter()
+            .any(|candidate| candidate.source == "py launcher")
+        {
+            details.push("已合并 py -0p 列出的所有 Python 安装".into());
+        }
+    }
+    if spec.id == "shell" {
+        let distros = wsl_distros();
+        if distros.is_empty() {
+            details.push("未检测到 WSL 发行版；当前 Shell 运行时为 Git Bash".into());
+        } else {
+            details.push(format!(
+                "检测到 WSL 发行版: {}（本版本仍使用 Git Bash 执行 .sh）",
+                distros.join(", ")
+            ));
+        }
+    }
+    if matches!(spec.id, "vbscript" | "jscript" | "wsf") {
+        details.push(
+            "Windows 11 中 Windows Script Host 为可选功能；若已移除或策略禁用，脚本无法启动".into(),
+        );
+    }
+    details.extend(path_details());
+
+    let mut error = None;
+    let mut status = if paths.is_empty() {
         "missing"
     } else if paths.len() > 1 {
         "multiple"
     } else {
         "ready"
     };
+    if matches!(spec.id, "vbscript" | "jscript" | "wsf") {
+        if let Some(reason) = wsh_disabled() {
+            status = "broken";
+            error = Some(reason);
+        }
+    }
+    if paths.is_empty() && error.is_none() {
+        error = Some("未在 PATH、注册表或常见安装目录中找到可执行文件".to_string());
+    }
+
+    let all_paths = paths
+        .iter()
+        .chain(gui_paths.iter())
+        .cloned()
+        .collect::<Vec<_>>();
 
     RuntimeInfo {
         id: spec.id.to_string(),
@@ -649,11 +981,9 @@ pub fn detect_one(spec: &RuntimeSpec) -> RuntimeInfo {
         version,
         status: status.to_string(),
         candidates,
-        error: if paths.is_empty() {
-            Some("未在 PATH、注册表或常见安装目录中找到可执行文件".to_string())
-        } else {
-            None
-        },
+        error,
+        details,
+        signature: signature_for(&all_paths),
     }
 }
 
@@ -675,6 +1005,8 @@ pub fn detect_all() -> Vec<RuntimeInfo> {
                     status: "broken".into(),
                     candidates: Vec::new(),
                     error: Some("运行时检测线程异常退出".into()),
+                    details: Vec::new(),
+                    signature: String::new(),
                 })
             })
             .collect()

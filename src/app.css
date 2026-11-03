@@ -97,3 +97,33 @@ button:disabled { cursor: not-allowed; opacity: .48; }
 .segmented { display: flex; gap: 4px; padding: 3px; border: 1px solid var(--line); border-radius: 9px; background: #0e131b; }
 .segmented button { flex: 1; height: 30px; border: 0; border-radius: 7px; color: var(--muted); background: transparent; font-size: 12px; }
 .segmented button.active { background: #202a38; color: var(--text); }
+
+.empty-state {
+  min-height: 300px; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; color: var(--muted); text-align: center;
+  border: 1px dashed #263040; border-radius: 12px; background: rgba(17, 23, 32, .45);
+}
+.empty-state h2 { color: var(--text); margin: 12px 0 4px; font-size: 16px; }
+.empty-state p { margin: 0 0 16px; font-size: 12px; }
+.empty-state.small { min-height: 240px; }
+.empty-icon { font-size: 34px; color: #3c4b60; }
+.spinner { width: 22px; height: 22px; border: 2px solid #2b394b; border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 12px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.row-actions { display: flex; justify-content: flex-end; gap: 3px; }
+.table-card { border: 1px solid var(--line-soft); border-radius: 11px; overflow: hidden; background: #111720; }
+.table-card .table-card { border: 0; border-radius: 0; }
+.badge.ok { color: #a7f3d0; border-color: #174b3e; }
+.badge.bad { color: #fecaca; border-color: #4a2529; }
+.badge.warn { color: #fde68a; border-color: #4b3a16; }
+.cell-sub { color: var(--muted); font-size: 10.5px; margin-top: 3px; }
+.cell-error { color: #fca5a5; font-size: 10px; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.right { text-align: right; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.form-grid.three { grid-template-columns: repeat(3, 1fr); }
+.check-row { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }
+.check-row input { accent-color: var(--accent-strong); }
+.modal.wide { width: min(760px, 100%); }
+@media (max-width: 900px) {
+  .form-grid, .form-grid.three { grid-template-columns: 1fr; }
+}

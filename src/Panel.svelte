@@ -9,10 +9,10 @@
   let error = $state("");
   let busy = $state<Record<string, boolean>>({});
 
-  const runningCount = $derived(scripts.filter((s) => s.status === "running" || s.status === "starting").length);
+  const runningCount = $derived(scripts.filter((s) => s.status === "running" || s.status === "starting" || s.status === "queued").length);
 
   function isBusy(script: Script): boolean {
-    return busy[script.id] === true || script.status === "starting" || script.status === "stopping";
+    return busy[script.id] === true || script.status === "starting" || script.status === "stopping" || script.status === "queued";
   }
 
   async function refresh() {

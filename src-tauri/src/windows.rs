@@ -1,4 +1,5 @@
 use crate::runner;
+use crate::settings;
 use crate::state::AppState;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -50,6 +51,23 @@ fn attach_close_behavior(window: &WebviewWindow) {
     window.on_window_event(move |event| {
         if let tauri::WindowEvent::CloseRequested { api, .. } = event {
             api.prevent_close();
+            if window_for_event.label() == MAIN_LABEL {
+                let exit_on_close = window_for_event
+                    .app_handle()
+                    .try_state::<AppState>()
+                    .and_then(|state| {
+                        state
+                            .db
+                            .lock()
+                            .ok()
+                            .map(|conn| settings::get_bool(&conn, "close_main_exits", false))
+                    })
+                    .unwrap_or(false);
+                if exit_on_close {
+                    exit_app(window_for_event.app_handle());
+                    return;
+                }
+            }
             let _ = window_for_event.destroy();
         }
     });
@@ -131,6 +149,20 @@ fn hide_panel(app: &AppHandle) {
 }
 
 pub fn close_main(app: &AppHandle) {
+    let exit_on_close = app
+        .try_state::<AppState>()
+        .and_then(|state| {
+            state
+                .db
+                .lock()
+                .ok()
+                .map(|conn| settings::get_bool(&conn, "close_main_exits", false))
+        })
+        .unwrap_or(false);
+    if exit_on_close {
+        exit_app(app);
+        return;
+    }
     if let Some(main) = app.get_webview_window(MAIN_LABEL) {
         let _ = main.destroy();
     }

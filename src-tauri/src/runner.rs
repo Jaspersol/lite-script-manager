@@ -1,16 +1,24 @@
 use crate::db;
-use crate::models::{LogBatchEvent, LogLine, RunStateEvent, Script};
+use crate::logging::{self, LogRing};
+use crate::metrics;
+use crate::models::{LifecycleEvent, LogBatchEvent, LogLine, RunStateEvent, Script, StartOptions};
 use crate::runtime;
+use crate::settings;
 use crate::state::AppState;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
+
+const LOG_RING_BYTES: usize = 256 * 1024;
+const MAX_LINE_CHARS: usize = 16_384;
 
 #[cfg(windows)]
 pub struct JobHandle {
@@ -155,8 +163,6 @@ impl JobHandle {
         if matches!(runtime_id, "autohotkey" | "autoit") {
             post_wm_close(pid);
         }
-        // Console runtimes receive CTRL_BREAK_EVENT through their own process group.
-        // GUI runtimes may ignore it, so WM_CLOSE above is the primary path for them.
         generate_ctrl_break(pid);
     }
 }
@@ -267,7 +273,7 @@ fn resume_process(_pid: u32) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn process_command_line(pid: u32) -> Option<String> {
+pub(crate) fn process_command_line(pid: u32) -> Option<String> {
     use std::mem::size_of;
     use windows_sys::Wdk::System::Threading::{
         NtQueryInformationProcess, ProcessCommandLineInformation,
@@ -280,7 +286,6 @@ fn process_command_line(pid: u32) -> Option<String> {
         if process.is_null() {
             return None;
         }
-        // Keep the buffer 8-byte aligned for UNICODE_STRING.
         let mut buffer = vec![0u64; 8192];
         let mut returned = 0u32;
         let status = NtQueryInformationProcess(
@@ -311,7 +316,7 @@ fn process_command_line(pid: u32) -> Option<String> {
 }
 
 #[cfg(windows)]
-fn list_processes() -> Vec<(u32, u32, String, String)> {
+pub(crate) fn snapshot_processes() -> Vec<(u32, u32, String)> {
     use std::mem::{size_of, zeroed};
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
@@ -335,13 +340,7 @@ fn list_processes() -> Vec<(u32, u32, String, String)> {
                     .position(|ch| *ch == 0)
                     .unwrap_or(entry.szExeFile.len());
                 let exe = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
-                let command_line = process_command_line(entry.th32ProcessID).unwrap_or_default();
-                processes.push((
-                    entry.th32ProcessID,
-                    entry.th32ParentProcessID,
-                    exe,
-                    command_line,
-                ));
+                processes.push((entry.th32ProcessID, entry.th32ParentProcessID, exe));
                 if Process32NextW(snapshot, &mut entry) == 0 {
                     break;
                 }
@@ -353,12 +352,61 @@ fn list_processes() -> Vec<(u32, u32, String, String)> {
 }
 
 #[cfg(not(windows))]
+pub(crate) fn snapshot_processes() -> Vec<(u32, u32, String)> {
+    Vec::new()
+}
+
+#[cfg(windows)]
+fn list_processes() -> Vec<(u32, u32, String, String)> {
+    snapshot_processes()
+        .into_iter()
+        .map(|(pid, parent, exe)| {
+            let command_line = process_command_line(pid).unwrap_or_default();
+            (pid, parent, exe, command_line)
+        })
+        .collect()
+}
+
+#[cfg(not(windows))]
 fn list_processes() -> Vec<(u32, u32, String, String)> {
     Vec::new()
 }
 
 #[cfg(windows)]
-fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_create_time_ms(pid: u32) -> Option<i64> {
+    use std::mem::zeroed;
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME};
+    use windows_sys::Win32::System::Threading::{
+        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return None;
+        }
+        let (mut creation, mut exit, mut kernel, mut user): (
+            FILETIME,
+            FILETIME,
+            FILETIME,
+            FILETIME,
+        ) = (zeroed(), zeroed(), zeroed(), zeroed());
+        let ok = GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user);
+        CloseHandle(process);
+        if ok == 0 {
+            return None;
+        }
+        let value = ((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64;
+        Some((value / 10_000) as i64 - 11_644_473_600_000)
+    }
+}
+
+#[cfg(not(windows))]
+pub(crate) fn process_create_time_ms(_pid: u32) -> Option<i64> {
+    None
+}
+
+#[cfg(windows)]
+pub fn process_alive(pid: u32) -> bool {
     use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
@@ -374,7 +422,7 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn process_alive(_pid: u32) -> bool {
+pub fn process_alive(_pid: u32) -> bool {
     false
 }
 
@@ -388,7 +436,7 @@ fn terminate_process_trees(roots: &[u32]) {
         return;
     }
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
-    for (pid, parent, _exe, _command_line) in list_processes() {
+    for (pid, parent, _exe) in snapshot_processes() {
         children.entry(parent).or_default().push(pid);
     }
     let mut targets = HashSet::new();
@@ -461,14 +509,14 @@ fn spawn_adopted_monitor(
         while guard.active_processes() > 0 || pids.iter().any(|pid| process_alive(*pid)) {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+        let state = app.state::<AppState>();
         let status = if stopped.load(Ordering::SeqCst) {
             "stopped"
         } else {
             "exited"
         };
-        let state = app.state::<AppState>();
         if let Ok(conn) = state.db.lock() {
-            let _ = db::finish_run(&conn, &run_id, status, None, None);
+            let _ = db::finish_run(&conn, &run_id, status, None, None, None, None, None, None);
         }
         if let Ok(mut runs) = state.runs.lock() {
             runs.remove(&run_id);
@@ -476,22 +524,30 @@ fn spawn_adopted_monitor(
         let _ = app.emit(
             "run-state",
             RunStateEvent {
-                run_id,
-                script_id,
+                run_id: run_id.clone(),
+                script_id: script_id.clone(),
                 status: status.to_string(),
                 exit_code: None,
                 error: None,
                 started_at,
                 ended_at: Some(db::now_ms()),
+                source: Some("adopted".into()),
+                source_id: None,
             },
         );
+        let _ = state.lifecycle_tx.send(LifecycleEvent {
+            run_id,
+            script_id,
+            status: status.into(),
+            exit_code: None,
+            source: "adopted".into(),
+            source_id: None,
+        });
     });
 }
 
 #[cfg(windows)]
 pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
-    use std::collections::HashSet;
-
     let state = app.state::<AppState>();
     if state.adopting.swap(true, Ordering::SeqCst) {
         return Ok(0);
@@ -560,7 +616,7 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
             let guard = match JobHandle::attach_many(&pids) {
                 Ok(guard) => Arc::new(guard),
                 Err(error) => {
-                    eprintln!("接管 {} 失败: {error}", script.name);
+                    logging::app_log("WARN", &format!("接管 {} 失败: {error}", script.name));
                     continue;
                 }
             };
@@ -575,9 +631,12 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                     pids.first().copied(),
                     started_at,
                     "",
+                    "adopted",
+                    None,
+                    None,
                 ) {
                     guard.terminate();
-                    eprintln!("接管 {} 写入运行记录失败: {error}", script.name);
+                    logging::app_log("ERROR", &format!("接管写入失败: {error}"));
                     continue;
                 }
             }
@@ -591,8 +650,18 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                 pids: pids.clone(),
                 guard: guard.clone(),
                 stopped: stopped.clone(),
+                stop_reason: Arc::new(StdMutex::new(None)),
                 started_at,
                 stop_timeout_sec: script.stop_timeout_sec.max(1),
+                stop_mode: script.stop_mode.clone(),
+                timeout_sec: None,
+                success_codes: script.success_codes.clone(),
+                source: "adopted".into(),
+                source_id: None,
+                ring: Arc::new(LogRing::new(LOG_RING_BYTES)),
+                peak_memory: Arc::new(AtomicU64::new(0)),
+                cpu_time: Arc::new(AtomicU64::new(0)),
+                log_bytes: Arc::new(AtomicU64::new(0)),
             };
             {
                 let mut runs = state
@@ -615,6 +684,8 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                     error: None,
                     started_at,
                     ended_at: None,
+                    source: Some("adopted".into()),
+                    source_id: None,
                 },
             );
             spawn_adopted_monitor(
@@ -677,16 +748,97 @@ pub struct RunHandle {
     pub pids: Vec<u32>,
     pub guard: Arc<JobHandle>,
     pub stopped: Arc<AtomicBool>,
+    pub stop_reason: Arc<StdMutex<Option<String>>>,
     pub started_at: i64,
     pub stop_timeout_sec: i64,
+    pub stop_mode: String,
+    pub timeout_sec: Option<i64>,
+    pub success_codes: String,
+    pub source: String,
+    pub source_id: Option<String>,
+    pub ring: Arc<LogRing>,
+    pub peak_memory: Arc<AtomicU64>,
+    pub cpu_time: Arc<AtomicU64>,
+    pub log_bytes: Arc<AtomicU64>,
 }
 
 fn tail_string(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         value.to_string()
     } else {
-        value.chars().take(max_chars).collect()
+        value
+            .chars()
+            .skip(value.chars().count().saturating_sub(max_chars))
+            .collect()
     }
+}
+
+fn success_code_allowed(expression: &str, code: i32) -> bool {
+    let expression = expression.trim();
+    if expression.is_empty() || expression == "*" {
+        return true;
+    }
+    for part in expression.split(',') {
+        let part = part.trim();
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start.trim().parse::<i32>().ok();
+            let end = end.trim().parse::<i32>().ok();
+            if let (Some(start), Some(end)) = (start, end) {
+                if code >= start && code <= end {
+                    return true;
+                }
+            }
+        } else if part.parse::<i32>().ok() == Some(code) {
+            return true;
+        }
+    }
+    false
+}
+
+fn preflight(app: &AppHandle, script: &Script) -> Result<(), String> {
+    if !script.enabled {
+        return Err("脚本已禁用".to_string());
+    }
+    let path = PathBuf::from(&script.path);
+    if !path.is_file() {
+        return Err(format!("脚本文件不存在: {}", script.path));
+    }
+    let state = app.state::<AppState>();
+    let (allowed_roots, verify_hash) = {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        (
+            settings::get(&conn, "allowed_roots").unwrap_or_default(),
+            settings::get_bool(&conn, "verify_script_hash", false),
+        )
+    };
+    if !logging::path_allowed(&path, &allowed_roots) {
+        return Err("脚本路径不在允许的根目录中".to_string());
+    }
+    if let Some(cwd) = &script.cwd {
+        let cwd = PathBuf::from(cwd);
+        if !cwd.is_dir() {
+            return Err(format!("工作目录不存在: {}", cwd.display()));
+        }
+    }
+    if script.args.iter().any(|arg| arg.contains('\0')) {
+        return Err("参数中包含非法空字符".to_string());
+    }
+    if script
+        .env
+        .keys()
+        .any(|key| key.is_empty() || key.contains('\0') || key.contains('='))
+    {
+        return Err("环境变量名称无效".to_string());
+    }
+    if verify_hash {
+        if let Some(expected) = &script.content_hash {
+            let actual = logging::sha256_file(&path)?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err("脚本内容哈希不匹配，已拒绝运行".to_string());
+            }
+        }
+    }
+    Ok(())
 }
 
 fn build_command(script: &Script, exe: &PathBuf) -> Result<tokio::process::Command, String> {
@@ -703,13 +855,7 @@ fn build_command(script: &Script, exe: &PathBuf) -> Result<tokio::process::Comma
         "python" => {
             command.args(["-u", "-X", "utf8"]).arg(&script_path);
         }
-        "javascript" => {
-            command.arg(&script_path);
-        }
-        "shell" => {
-            command.arg(&script_path);
-        }
-        "perl" | "php" | "r" | "lua" => {
+        "javascript" | "shell" | "perl" | "php" | "r" | "lua" | "autohotkey" => {
             command.arg(&script_path);
         }
         "batch" => {
@@ -740,9 +886,6 @@ fn build_command(script: &Script, exe: &PathBuf) -> Result<tokio::process::Comma
         "wsf" => {
             command.args(["//nologo", "//B"]).arg(&script_path);
         }
-        "autohotkey" => {
-            command.arg(&script_path);
-        }
         "autoit" => {
             command.arg("/ErrorStdOut").arg(&script_path);
         }
@@ -751,10 +894,7 @@ fn build_command(script: &Script, exe: &PathBuf) -> Result<tokio::process::Comma
     command.args(&script.args);
 
     if let Some(cwd) = &script.cwd {
-        let cwd = PathBuf::from(cwd);
-        if cwd.exists() {
-            command.current_dir(cwd);
-        }
+        command.current_dir(PathBuf::from(cwd));
     } else if let Some(parent) = PathBuf::from(&script.path).parent() {
         command.current_dir(parent);
     }
@@ -773,7 +913,6 @@ fn build_command(script: &Script, exe: &PathBuf) -> Result<tokio::process::Comma
         .stderr(Stdio::piped());
     #[cfg(windows)]
     {
-        // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP | CREATE_SUSPENDED
         command.creation_flags(0x08000000 | 0x00000200 | 0x00000004);
     }
     #[cfg(unix)]
@@ -810,35 +949,58 @@ async fn pump_output<R>(
     app: AppHandle,
     run_id: String,
     script_id: String,
+    ring: Arc<LogRing>,
+    log_bytes: Arc<AtomicU64>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut batch: Vec<LogLine> = Vec::new();
 
     loop {
+        let mut bytes = Vec::new();
         tokio::select! {
             _ = ticker.tick() => {
-                flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                    flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                } else {
+                    batch.clear();
+                }
             }
-            result = lines.next_line() => {
+            result = reader.read_until(b'\n', &mut bytes) => {
                 match result {
-                    Ok(Some(line)) => {
-                        let line = tail_string(&line, 16_384);
+                    Ok(0) => {
+                        if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                            flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                        }
+                        break;
+                    }
+                    Ok(_) => {
+                        while bytes.last().is_some_and(|value| *value == b'\n' || *value == b'\r') {
+                            bytes.pop();
+                        }
+                        let line = tail_string(&logging::decode_output(&bytes), MAX_LINE_CHARS);
                         let formatted = format!("[{stream}] {line}\n");
                         {
                             let mut file = log.lock().await;
-                            let _ = file.write_all(formatted.as_bytes()).await;
+                            if file.write_all(formatted.as_bytes()).await.is_ok() {
+                                log_bytes.fetch_add(formatted.len() as u64, Ordering::Relaxed);
+                            }
                         }
-                        batch.push(LogLine { stream: stream.to_string(), line });
-                        if batch.len() >= 64 {
-                            flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                        ring.push(LogLine { stream: stream.to_string(), line: line.clone() });
+                        if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                            batch.push(LogLine { stream: stream.to_string(), line });
+                            if batch.len() >= 64 {
+                                flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                            }
                         }
                     }
-                    Ok(None) | Err(_) => {
-                        flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                    Err(_) => {
+                        if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                            flush_log_batch(&app, &run_id, &script_id, &mut batch);
+                        }
                         break;
                     }
                 }
@@ -847,19 +1009,295 @@ async fn pump_output<R>(
     }
 }
 
+fn finish_run(
+    app: &AppHandle,
+    run: &RunHandle,
+    status: &str,
+    exit_code: Option<i32>,
+    error: Option<String>,
+) {
+    let final_metrics = metrics::process_metrics(&run.pids);
+    let peak = run
+        .peak_memory
+        .fetch_max(final_metrics.memory_bytes, Ordering::Relaxed)
+        .max(final_metrics.memory_bytes);
+    let cpu = run
+        .cpu_time
+        .fetch_max(final_metrics.cpu_time_ms, Ordering::Relaxed)
+        .max(final_metrics.cpu_time_ms);
+    let reason = run.stop_reason.lock().ok().and_then(|value| value.clone());
+    let state = app.state::<AppState>();
+    if let Ok(conn) = state.db.lock() {
+        let _ = db::finish_run(
+            &conn,
+            &run.run_id,
+            status,
+            exit_code,
+            error.as_deref(),
+            reason.as_deref(),
+            Some(peak as i64),
+            Some(cpu as i64),
+            Some(run.log_bytes.load(Ordering::Relaxed) as i64),
+        );
+        let _ = logging::prune_logs(&conn, &state.data_dir);
+    }
+    if let Ok(mut runs) = state.runs.lock() {
+        runs.remove(&run.run_id);
+    }
+    let _ = app.emit(
+        "run-state",
+        RunStateEvent {
+            run_id: run.run_id.clone(),
+            script_id: run.script_id.clone(),
+            status: status.to_string(),
+            exit_code,
+            error,
+            started_at: run.started_at,
+            ended_at: Some(db::now_ms()),
+            source: Some(run.source.clone()),
+            source_id: run.source_id.clone(),
+        },
+    );
+    let _ = state.lifecycle_tx.send(LifecycleEvent {
+        run_id: run.run_id.clone(),
+        script_id: run.script_id.clone(),
+        status: status.to_string(),
+        exit_code,
+        source: run.source.clone(),
+        source_id: run.source_id.clone(),
+    });
+}
+
+fn spawn_metrics_sampler(app: AppHandle, handle: RunHandle) {
+    tauri::async_runtime::spawn(async move {
+        loop {
+            {
+                let state = app.state::<AppState>();
+                let active = state
+                    .runs
+                    .lock()
+                    .map(|runs| runs.contains_key(&handle.run_id))
+                    .unwrap_or(false);
+                if !active {
+                    break;
+                }
+            }
+            let sample = metrics::process_metrics(&handle.pids);
+            handle
+                .peak_memory
+                .fetch_max(sample.memory_bytes, Ordering::Relaxed);
+            handle
+                .cpu_time
+                .fetch_max(sample.cpu_time_ms, Ordering::Relaxed);
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    });
+}
+
+fn spawn_timeout(app: AppHandle, handle: RunHandle) {
+    let Some(timeout_sec) = handle.timeout_sec.filter(|value| *value > 0) else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(timeout_sec as u64)).await;
+        let state = app.state::<AppState>();
+        let active = state
+            .runs
+            .lock()
+            .map(|runs| runs.contains_key(&handle.run_id))
+            .unwrap_or(false);
+        if !active {
+            return;
+        }
+        if let Ok(mut reason) = handle.stop_reason.lock() {
+            *reason = Some("timeout".into());
+        }
+        handle.stopped.store(true, Ordering::SeqCst);
+        handle.guard.terminate();
+        terminate_process_trees(&handle.pids);
+        logging::app_log(
+            "WARN",
+            &format!("脚本 {} 达到运行超时 {} 秒", handle.script_id, timeout_sec),
+        );
+    });
+}
+
+fn spawn_waiter(app: AppHandle, mut child: tokio::process::Child, handle: RunHandle) {
+    tauri::async_runtime::spawn(async move {
+        let wait_result = child.wait().await;
+        let (exit_code, wait_error) = match wait_result {
+            Ok(status) => (status.code(), None),
+            Err(error) => (None, Some(format!("等待进程结束失败: {error}"))),
+        };
+
+        while handle.guard.active_processes() > 0 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+
+        let reason = handle
+            .stop_reason
+            .lock()
+            .ok()
+            .and_then(|value| value.clone());
+        let success =
+            exit_code.is_some_and(|code| success_code_allowed(&handle.success_codes, code));
+        let final_status = if reason.as_deref() == Some("timeout") {
+            "failed"
+        } else if reason.is_some() {
+            "stopped"
+        } else if success {
+            "exited"
+        } else {
+            "failed"
+        };
+        let error = wait_error.or_else(|| {
+            if reason.as_deref() == Some("timeout") {
+                Some("运行超时".to_string())
+            } else if final_status == "failed" {
+                Some(format!("进程退出码 {}", exit_code.unwrap_or(-1)))
+            } else {
+                None
+            }
+        });
+        finish_run(&app, &handle, final_status, exit_code, error);
+    });
+}
+
+pub fn active_count(app: &AppHandle, script_id: &str) -> usize {
+    app.state::<AppState>()
+        .runs
+        .lock()
+        .map(|runs| {
+            runs.values()
+                .filter(|run| run.script_id == script_id)
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn force_stop_script(app: &AppHandle, script_id: &str, reason: &str) {
+    let handles = app
+        .state::<AppState>()
+        .runs
+        .lock()
+        .map(|runs| {
+            runs.values()
+                .filter(|run| run.script_id == script_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for handle in handles {
+        if let Ok(mut value) = handle.stop_reason.lock() {
+            *value = Some(reason.to_string());
+        }
+        handle.stopped.store(true, Ordering::SeqCst);
+        handle.guard.terminate();
+        terminate_process_trees(&handle.pids);
+    }
+    std::thread::sleep(Duration::from_millis(250));
+}
+
 pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
-    if !script.enabled {
-        return Err("脚本已禁用".to_string());
+    let options = StartOptions {
+        source: "manual".into(),
+        source_id: None,
+        timeout_sec: script.timeout_sec,
+        success_codes: script.success_codes.clone(),
+        overlap_policy: script.instance_policy.clone(),
+    };
+    start_with(app, script, options)
+}
+
+pub fn start_with(
+    app: &AppHandle,
+    script: Script,
+    options: StartOptions,
+) -> Result<RunStateEvent, String> {
+    preflight(app, &script)?;
+    let active = active_count(app, &script.id);
+    let max_instances = script.max_instances.max(1) as usize;
+    if active >= max_instances {
+        match options.overlap_policy.as_str() {
+            "skip" => {
+                return Err(format!(
+                    "{} 已有 {} 个实例运行中，已按 skip 策略跳过",
+                    script.name, active
+                ));
+            }
+            "replace" => {
+                force_stop_script(app, &script.id, "replace");
+            }
+            "queue" => {
+                let queued_id = format!("queued-{}", Uuid::new_v4());
+                let started_at = db::now_ms();
+                let event = RunStateEvent {
+                    run_id: queued_id.clone(),
+                    script_id: script.id.clone(),
+                    status: "queued".into(),
+                    exit_code: None,
+                    error: None,
+                    started_at,
+                    ended_at: None,
+                    source: Some(options.source.clone()),
+                    source_id: options.source_id.clone(),
+                };
+                let _ = app.emit("run-state", event.clone());
+                let app_for_queue = app.clone();
+                let mut queued_options = options.clone();
+                queued_options.overlap_policy = "parallel".into();
+                tauri::async_runtime::spawn(async move {
+                    loop {
+                        if app_for_queue
+                            .state::<AppState>()
+                            .exiting
+                            .load(Ordering::SeqCst)
+                        {
+                            return;
+                        }
+                        if active_count(&app_for_queue, &script.id) == 0 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                    }
+                    if let Err(error) = start_with(&app_for_queue, script.clone(), queued_options) {
+                        let _ = app_for_queue.emit(
+                            "run-state",
+                            RunStateEvent {
+                                run_id: queued_id,
+                                script_id: script.id,
+                                status: "failed".into(),
+                                exit_code: None,
+                                error: Some(error.clone()),
+                                started_at,
+                                ended_at: Some(db::now_ms()),
+                                source: Some("queue".into()),
+                                source_id: None,
+                            },
+                        );
+                    }
+                });
+                return Ok(event);
+            }
+            "parallel" => {
+                return Err(format!(
+                    "{} 已达到最大实例数 {}，请调整实例策略",
+                    script.name, max_instances
+                ));
+            }
+            _ => {}
+        }
     }
-    if !PathBuf::from(&script.path).exists() {
-        return Err(format!("脚本文件不存在: {}", script.path));
-    }
+
     let spec = runtime::find_spec(&script.runtime_id)
         .ok_or_else(|| format!("未知运行时: {}", script.runtime_id))?;
     let exe =
         runtime::resolve_executable(spec, script.interpreter_path.as_deref(), Some(&script.path))?;
     let mut command = build_command(&script, &exe)?;
-    let mut child = command.spawn().map_err(|e| format!("启动进程失败: {e}"))?;
+    let mut child = command.spawn().map_err(|e| {
+        logging::app_log("ERROR", &format!("启动 {} 失败: {e}", script.name));
+        format!("启动进程失败: {e}")
+    })?;
     let pid = child.id().ok_or_else(|| "无法获取子进程 PID".to_string())?;
 
     let guard = match JobHandle::attach(pid) {
@@ -906,7 +1344,11 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
             Some(pid),
             started_at,
             &log_path.display().to_string(),
+            &options.source,
+            options.source_id.as_deref(),
+            options.timeout_sec,
         ) {
+            logging::app_log("ERROR", &format!("写入运行记录失败: {error}"));
             drop(conn);
             guard.terminate();
             return Err(error);
@@ -922,15 +1364,25 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
         pids: vec![pid],
         guard: guard.clone(),
         stopped: stopped.clone(),
+        stop_reason: Arc::new(StdMutex::new(None)),
         started_at,
         stop_timeout_sec: script.stop_timeout_sec.max(1),
+        stop_mode: script.stop_mode.clone(),
+        timeout_sec: options.timeout_sec,
+        success_codes: options.success_codes.clone(),
+        source: options.source.clone(),
+        source_id: options.source_id.clone(),
+        ring: Arc::new(LogRing::new(LOG_RING_BYTES)),
+        peak_memory: Arc::new(AtomicU64::new(0)),
+        cpu_time: Arc::new(AtomicU64::new(0)),
+        log_bytes: Arc::new(AtomicU64::new(0)),
     };
     if let Err(error) = state
         .runs
         .lock()
         .map_err(|_| "运行状态锁失败".to_string())
         .map(|mut runs| {
-            runs.insert(run_id.clone(), handle);
+            runs.insert(run_id.clone(), handle.clone());
         })
     {
         guard.terminate();
@@ -945,8 +1397,18 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
         error: None,
         started_at,
         ended_at: None,
+        source: Some(options.source.clone()),
+        source_id: options.source_id.clone(),
     };
     let _ = app.emit("run-state", event.clone());
+    let _ = state.lifecycle_tx.send(LifecycleEvent {
+        run_id: run_id.clone(),
+        script_id: script.id.clone(),
+        status: "running".into(),
+        exit_code: None,
+        source: options.source.clone(),
+        source_id: options.source_id.clone(),
+    });
 
     let log = Arc::new(AsyncMutex::new(log_file));
     if let Some(stdout) = child.stdout.take() {
@@ -954,8 +1416,13 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
         let log = log.clone();
         let run_id = run_id.clone();
         let script_id = script.id.clone();
+        let ring = handle.ring.clone();
+        let log_bytes = handle.log_bytes.clone();
         tauri::async_runtime::spawn(async move {
-            pump_output(stdout, "stdout", log, app, run_id, script_id).await;
+            pump_output(
+                stdout, "stdout", log, app, run_id, script_id, ring, log_bytes,
+            )
+            .await;
         });
     }
     if let Some(stderr) = child.stderr.take() {
@@ -963,71 +1430,19 @@ pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
         let log = log.clone();
         let run_id = run_id.clone();
         let script_id = script.id.clone();
+        let ring = handle.ring.clone();
+        let log_bytes = handle.log_bytes.clone();
         tauri::async_runtime::spawn(async move {
-            pump_output(stderr, "stderr", log, app, run_id, script_id).await;
+            pump_output(
+                stderr, "stderr", log, app, run_id, script_id, ring, log_bytes,
+            )
+            .await;
         });
     }
 
-    let app_for_wait = app.clone();
-    let run_id_for_wait = run_id.clone();
-    let script_id_for_wait = script.id.clone();
-    let stopped_for_wait = stopped.clone();
-    let guard_for_wait = guard.clone();
-    tauri::async_runtime::spawn(async move {
-        let wait_result = child.wait().await;
-        let was_stopped = stopped_for_wait.load(Ordering::SeqCst);
-        let (exit_code, wait_error) = match wait_result {
-            Ok(status) => (status.code(), None),
-            Err(error) => (None, Some(format!("等待进程结束失败: {error}"))),
-        };
-
-        // A launcher can spawn a long-lived child and exit immediately. Keep the
-        // run alive until the whole Job Object is empty so that the spawned
-        // process is still visible and stoppable from the UI.
-        while guard_for_wait.active_processes() > 0 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-
-        let final_status = if was_stopped {
-            "stopped"
-        } else if exit_code == Some(0) {
-            "exited"
-        } else {
-            "failed"
-        };
-        let error = wait_error.or_else(|| {
-            if final_status == "failed" {
-                Some(format!("进程退出码 {}", exit_code.unwrap_or(-1)))
-            } else {
-                None
-            }
-        });
-        let state = app_for_wait.state::<AppState>();
-        if let Ok(conn) = state.db.lock() {
-            let _ = db::finish_run(
-                &conn,
-                &run_id_for_wait,
-                final_status,
-                exit_code,
-                error.as_deref(),
-            );
-        }
-        if let Ok(mut runs) = state.runs.lock() {
-            runs.remove(&run_id_for_wait);
-        }
-        let _ = app_for_wait.emit(
-            "run-state",
-            RunStateEvent {
-                run_id: run_id_for_wait,
-                script_id: script_id_for_wait,
-                status: final_status.to_string(),
-                exit_code,
-                error,
-                started_at,
-                ended_at: Some(db::now_ms()),
-            },
-        );
-    });
+    spawn_metrics_sampler(app.clone(), handle.clone());
+    spawn_timeout(app.clone(), handle.clone());
+    spawn_waiter(app.clone(), child, handle);
 
     Ok(event)
 }
@@ -1049,9 +1464,17 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
     }
     for handle in handles {
         handle.stopped.store(true, Ordering::SeqCst);
-        handle
-            .guard
-            .request_graceful(handle.pid, &handle.runtime_id);
+        if let Ok(mut reason) = handle.stop_reason.lock() {
+            *reason = Some("user".into());
+        }
+        if handle.stop_mode == "force" {
+            handle.guard.terminate();
+            terminate_process_trees(&handle.pids);
+        } else {
+            handle
+                .guard
+                .request_graceful(handle.pid, &handle.runtime_id);
+        }
         let _ = app.emit(
             "run-state",
             RunStateEvent {
@@ -1062,11 +1485,14 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
                 error: None,
                 started_at: handle.started_at,
                 ended_at: None,
+                source: Some(handle.source.clone()),
+                source_id: handle.source_id.clone(),
             },
         );
 
-        // Give the process a chance to exit cleanly. The wait task removes the
-        // run from state as soon as it finishes; only surviving runs are forced.
+        if handle.stop_mode == "force" {
+            continue;
+        }
         let app_for_timer = app.clone();
         let guard = handle.guard.clone();
         let pids = handle.pids.clone();
@@ -1098,6 +1524,9 @@ pub fn stop_all(app: &AppHandle) {
     };
     for handle in handles {
         handle.stopped.store(true, Ordering::SeqCst);
+        if let Ok(mut reason) = handle.stop_reason.lock() {
+            *reason = Some("app_exit".into());
+        }
         handle.guard.terminate();
         terminate_process_trees(&handle.pids);
     }
@@ -1105,7 +1534,7 @@ pub fn stop_all(app: &AppHandle) {
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::resume_process;
+    use super::{resume_process, success_code_allowed};
     use std::os::windows::process::CommandExt;
 
     #[test]
@@ -1122,5 +1551,13 @@ mod tests {
         }
         let status = child.wait().expect("wait for child");
         assert!(status.success());
+    }
+
+    #[test]
+    fn checks_success_codes() {
+        assert!(success_code_allowed("0", 0));
+        assert!(!success_code_allowed("0", 1));
+        assert!(success_code_allowed("0,2,10-12", 11));
+        assert!(success_code_allowed("*", 9));
     }
 }
