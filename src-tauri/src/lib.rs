@@ -325,17 +325,25 @@ fn reorder_scripts(app: AppHandle, state: State<AppState>, ids: Vec<String>) -> 
     Ok(())
 }
 
+/// Spawns blocking process work off the event-loop thread, which would
+/// otherwise stall window messages and freeze the panel.
 #[tauri::command]
-fn run_script(app: AppHandle, state: State<AppState>, id: String) -> Result<RunStateEvent, String> {
+async fn run_script(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<RunStateEvent, String> {
     let script = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         db::get_script(&conn, &id)?.ok_or_else(|| "脚本不存在".to_string())?
     };
-    runner::start(&app, script)
+    tauri::async_runtime::spawn_blocking(move || runner::start(&app, script))
+        .await
+        .map_err(|e| format!("启动任务失败: {e}"))?
 }
 
 #[tauri::command]
-fn stop_script(app: AppHandle, state: State<AppState>, id: String) -> Result<(), String> {
+async fn stop_script(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let script_exists = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         db::get_script(&conn, &id)?.is_some()
@@ -343,17 +351,21 @@ fn stop_script(app: AppHandle, state: State<AppState>, id: String) -> Result<(),
     if !script_exists {
         return Err("脚本不存在".to_string());
     }
-    runner::stop(&app, &id)
+    tauri::async_runtime::spawn_blocking(move || runner::stop(&app, &id))
+        .await
+        .map_err(|e| format!("停止任务失败: {e}"))?
 }
 
 #[tauri::command]
-fn stop_all_scripts(app: AppHandle) {
-    runner::stop_all(&app, false);
+async fn stop_all_scripts(app: AppHandle) {
+    let _ = tauri::async_runtime::spawn_blocking(move || runner::stop_all(&app, false)).await;
 }
 
 #[tauri::command]
 async fn adopt_external_runs(app: AppHandle) -> Result<usize, String> {
-    runner::adopt_external(&app)
+    tauri::async_runtime::spawn_blocking(move || runner::adopt_external(&app))
+        .await
+        .map_err(|e| format!("接管任务失败: {e}"))?
 }
 
 #[tauri::command]

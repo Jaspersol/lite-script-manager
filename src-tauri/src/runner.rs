@@ -496,6 +496,166 @@ fn spawn_adopted_monitor(app: AppHandle, handle: RunHandle) {
     });
 }
 
+/// Collects the PIDs belonging to a script: an explicit `process_match` wins,
+/// otherwise the script path is matched against process names and command lines.
+fn matching_pids(
+    script: &Script,
+    processes: &[(u32, u32, String, String)],
+    command_lines: &mut HashMap<u32, String>,
+    managed_pids: &HashSet<u32>,
+    current_pid: u32,
+) -> Vec<u32> {
+    let pattern = script
+        .process_match
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let path_needle = normalized_match(&script.path);
+    if pattern.is_none() && path_needle.is_empty() {
+        return Vec::new();
+    }
+
+    let mut pids = Vec::new();
+    for (pid, _parent, exe, normalized_exe) in processes {
+        if *pid == current_pid || managed_pids.contains(pid) {
+            continue;
+        }
+        let needle = match pattern {
+            Some(value) => normalized_match(value),
+            None => path_needle.clone(),
+        };
+        if needle.is_empty() {
+            continue;
+        }
+        if pattern.is_none() && !executable_allowed(script, exe) {
+            continue;
+        }
+        if normalized_exe.contains(&needle) {
+            pids.push(*pid);
+            continue;
+        }
+        let command_line = command_lines
+            .entry(*pid)
+            .or_insert_with(|| normalized_match(&process_command_line(*pid).unwrap_or_default()));
+        if command_line.contains(&needle) {
+            pids.push(*pid);
+        }
+    }
+    pids
+}
+
+#[cfg(windows)]
+fn attach_running(app: &AppHandle, script: &Script) -> Option<RunStateEvent> {
+    let state = app.state::<AppState>();
+    let processes = snapshot_processes()
+        .into_iter()
+        .map(|(pid, parent, exe)| {
+            let normalized = normalized_match(&exe);
+            (pid, parent, exe, normalized)
+        })
+        .collect::<Vec<_>>();
+    if processes.is_empty() {
+        return None;
+    }
+    let managed_pids = state
+        .runs
+        .lock()
+        .map(|runs| {
+            runs.values()
+                .flat_map(|run| run.pids.iter().copied())
+                .collect::<HashSet<_>>()
+        })
+        .unwrap_or_default();
+    let mut command_lines = HashMap::new();
+    let pids = matching_pids(
+        script,
+        &processes,
+        &mut command_lines,
+        &managed_pids,
+        std::process::id(),
+    );
+    if pids.is_empty() {
+        return None;
+    }
+    let guard = match JobHandle::attach_many(&pids) {
+        Ok(guard) => Arc::new(guard),
+        Err(error) => {
+            logging::app_log("WARN", &format!("接管 {} 失败: {error}", script.name));
+            return None;
+        }
+    };
+    let run_id = Uuid::new_v4().to_string();
+    let started_at = db::now_ms();
+    {
+        let conn = state.db.lock().ok()?;
+        if let Err(error) = db::insert_run(
+            &conn,
+            &run_id,
+            &script.id,
+            pids.first().copied(),
+            started_at,
+            "",
+            "adopted",
+            None,
+            None,
+        ) {
+            guard.terminate();
+            logging::app_log("ERROR", &format!("接管写入失败: {error}"));
+            return None;
+        }
+    }
+    let handle = RunHandle {
+        run_id: run_id.clone(),
+        script_id: script.id.clone(),
+        runtime_id: script.runtime_id.clone(),
+        pid: pids[0],
+        pids: pids.clone(),
+        guard: guard.clone(),
+        stopped: Arc::new(AtomicBool::new(false)),
+        stop_reason: Arc::new(StdMutex::new(None)),
+        started_at,
+        stop_timeout_sec: script.stop_timeout_sec.max(1),
+        stop_mode: script.stop_mode.clone(),
+        timeout_sec: None,
+        success_codes: script.success_codes.clone(),
+        source: "adopted".into(),
+        source_id: None,
+        ring: Arc::new(LogRing::new(LOG_RING_BYTES)),
+        peak_memory: Arc::new(AtomicU64::new(0)),
+        cpu_time: Arc::new(AtomicU64::new(0)),
+        log_bytes: Arc::new(AtomicU64::new(0)),
+    };
+    if let Ok(mut runs) = state.runs.lock() {
+        runs.insert(run_id.clone(), handle.clone());
+    } else {
+        guard.terminate();
+        return None;
+    }
+    let event = RunStateEvent {
+        run_id: run_id.clone(),
+        script_id: script.id.clone(),
+        status: "running".into(),
+        exit_code: None,
+        error: None,
+        started_at,
+        ended_at: None,
+        source: Some("adopted".into()),
+        source_id: None,
+    };
+    let _ = app.emit("run-state", event.clone());
+    spawn_adopted_monitor(app.clone(), handle);
+    logging::app_log(
+        "INFO",
+        &format!("已接管正在运行的 {}（PID {:?}）", script.name, pids),
+    );
+    Some(event)
+}
+
+#[cfg(not(windows))]
+fn attach_running(_app: &AppHandle, _script: &Script) -> Option<RunStateEvent> {
+    None
+}
+
 #[cfg(windows)]
 pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
     let state = app.state::<AppState>();
@@ -540,38 +700,13 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                 continue;
             }
 
-            let pattern = script
-                .process_match
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
-            let needle = match pattern {
-                Some(value) => normalized_match(value),
-                None => normalized_match(&script.path),
-            };
-            if needle.is_empty() {
-                continue;
-            }
-
-            let mut pids = Vec::new();
-            for (pid, _parent, exe, normalized_exe) in &processes {
-                if *pid == current_pid || managed_pids.contains(pid) {
-                    continue;
-                }
-                if pattern.is_none() && !executable_allowed(&script, exe) {
-                    continue;
-                }
-                if normalized_exe.contains(&needle) {
-                    pids.push(*pid);
-                    continue;
-                }
-                let command_line = command_lines.entry(*pid).or_insert_with(|| {
-                    normalized_match(&process_command_line(*pid).unwrap_or_default())
-                });
-                if command_line.contains(&needle) {
-                    pids.push(*pid);
-                }
-            }
+            let pids = matching_pids(
+                &script,
+                &processes,
+                &mut command_lines,
+                &managed_pids,
+                current_pid,
+            );
             if pids.is_empty() {
                 continue;
             }
@@ -795,13 +930,26 @@ fn preflight(app: &AppHandle, script: &Script) -> Result<(), String> {
     Ok(())
 }
 
+/// Strips the `\\?\` verbatim prefix, which `cmd.exe` and `powershell -File`
+/// cannot open.
+pub fn plain_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    path.to_string()
+}
+
 fn build_command(script: &Script, exe: &PathBuf) -> Result<tokio::process::Command, String> {
     let spec = runtime::find_spec(&script.runtime_id)
         .ok_or_else(|| format!("未知运行时: {}", script.runtime_id))?;
+    let plain = plain_path(&script.path);
     let script_path = if spec.id == "shell" {
-        script.path.replace('\\', "/")
+        plain.replace('\\', "/")
     } else {
-        script.path.clone()
+        plain
     };
 
     let mut command = tokio::process::Command::new(exe);
@@ -1144,6 +1292,37 @@ pub fn active_count(app: &AppHandle, script_id: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Grace period so a freshly spawned child is not mistaken for a dead one.
+const STALE_RUN_MIN_AGE: Duration = Duration::from_secs(5);
+
+/// Finalizes runs whose process tree is already gone. A waiter that never ran
+/// leaves the handle in `runs`, which keeps occupying an instance slot and
+/// rejects every later start as "already running".
+pub fn sweep_dead_runs(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let dead = {
+        let Ok(runs) = state.runs.lock() else {
+            return;
+        };
+        let now = db::now_ms();
+        runs.values()
+            .filter(|run| {
+                now.saturating_sub(run.started_at) >= STALE_RUN_MIN_AGE.as_millis() as i64
+            })
+            .filter(|run| run.guard.active_processes() == 0)
+            .filter(|run| !run.pids.iter().any(|pid| process_alive(*pid)))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    for handle in dead {
+        logging::app_log(
+            "WARN",
+            &format!("回收已结束但未收尾的运行 {}", handle.run_id),
+        );
+        finish_run(app, &handle, "exited", None, None);
+    }
+}
+
 fn force_stop_script(app: &AppHandle, script_id: &str, reason: &str) {
     let handles = app
         .state::<AppState>()
@@ -1184,6 +1363,14 @@ pub fn start_with(
     options: StartOptions,
 ) -> Result<RunStateEvent, String> {
     preflight(app, &script)?;
+    sweep_dead_runs(app);
+    // Adopt an instance still running from a previous session instead of
+    // spawning a duplicate or refusing with "already running".
+    if active_count(app, &script.id) == 0
+        && let Some(event) = attach_running(app, &script)
+    {
+        return Ok(event);
+    }
     let active = active_count(app, &script.id);
     let max_instances = script.max_instances.max(1) as usize;
     if active >= max_instances {
@@ -1467,7 +1654,7 @@ fn stop_handle(app: &AppHandle, handle: &RunHandle, reason: &str, force: bool) {
 
 pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let handles = {
+    let mut handles = {
         let runs = state
             .runs
             .lock()
@@ -1478,7 +1665,29 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
             .collect::<Vec<_>>()
     };
     if handles.is_empty() {
-        return Err("脚本当前没有运行中的实例".to_string());
+        // Adopt a process still running from an earlier session so the stop
+        // request targets a real handle.
+        let script = {
+            let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+            db::get_script(&conn, script_id)?
+        }
+        .ok_or_else(|| "脚本不存在".to_string())?;
+        if attach_running(app, &script).is_none() {
+            return Err("脚本当前没有运行中的实例".to_string());
+        }
+        handles = {
+            let runs = state
+                .runs
+                .lock()
+                .map_err(|_| "运行状态锁失败".to_string())?;
+            runs.values()
+                .filter(|run| run.script_id == script_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        if handles.is_empty() {
+            return Err("脚本当前没有运行中的实例".to_string());
+        }
     }
     for handle in &handles {
         stop_handle(app, handle, "user", false);
@@ -1496,6 +1705,54 @@ pub fn stop_all(app: &AppHandle, force: bool) {
     let reason = if force { "app_exit" } else { "user" };
     for handle in &handles {
         stop_handle(app, handle, reason, force);
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::plain_path;
+
+    #[test]
+    fn strips_verbatim_drive_prefix() {
+        assert_eq!(plain_path(r"\\?\C:\a\b.vbs"), r"C:\a\b.vbs");
+    }
+
+    #[test]
+    fn strips_verbatim_unc_prefix() {
+        assert_eq!(
+            plain_path(r"\\?\UNC\server\share\a.bat"),
+            r"\\server\share\a.bat"
+        );
+    }
+
+    #[test]
+    fn keeps_ordinary_paths_untouched() {
+        assert_eq!(plain_path(r"C:\a\b.vbs"), r"C:\a\b.vbs");
+        assert_eq!(plain_path(r"\\server\share\a.bat"), r"\\server\share\a.bat");
+    }
+
+    /// Regression: `cmd.exe` rejects a verbatim path.
+    #[cfg(windows)]
+    #[test]
+    fn batch_runs_from_a_plain_path() {
+        use std::os::windows::process::CommandExt;
+        let dir = std::env::temp_dir();
+        let script = dir.join(format!("lsm-batch-{}.bat", uuid::Uuid::new_v4()));
+        std::fs::write(&script, "@echo off\r\necho ok-plain\r\n").expect("write batch");
+
+        let verbatim = format!("{}{}", r"\\?\", script.display());
+        let plain = plain_path(&verbatim);
+        let mut command = std::process::Command::new(
+            std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into()),
+        );
+        command
+            .args(["/d", "/s", "/c", "call", &plain])
+            .creation_flags(0x08000000);
+        let output = command.output().expect("run batch");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let _ = std::fs::remove_file(&script);
+        assert!(output.status.success(), "batch failed with plain path");
+        assert!(stdout.contains("ok-plain"));
     }
 }
 

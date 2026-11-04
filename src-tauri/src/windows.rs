@@ -13,7 +13,7 @@ use tauri::{
 /// Suppresses the tray click that caused the dismissal.
 static PANEL_BLUR_AT: Mutex<Option<Instant>> = Mutex::new(None);
 const PANEL_REOPEN_GUARD: Duration = Duration::from_millis(300);
-const BLUR_DEBOUNCE: Duration = Duration::from_millis(150);
+const PANEL_WATCH_INTERVAL: Duration = Duration::from_millis(120);
 
 const PANEL_LABEL: &str = "panel";
 const MAIN_LABEL: &str = "main";
@@ -52,26 +52,6 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
-}
-
-fn attach_dismiss_on_blur(window: &WebviewWindow) {
-    let window_for_event = window.clone();
-    window.on_window_event(move |event| {
-        if let tauri::WindowEvent::Focused(false) = event {
-            let window = window_for_event.clone();
-            // Ignore transient focus loss while the panel is being shown.
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(BLUR_DEBOUNCE).await;
-                if window.is_focused().unwrap_or(false) || !window.is_visible().unwrap_or(false) {
-                    return;
-                }
-                if let Ok(mut at) = PANEL_BLUR_AT.lock() {
-                    *at = Some(Instant::now());
-                }
-                let _ = window.destroy();
-            });
-        }
-    });
 }
 
 fn attach_close_behavior(window: &WebviewWindow) {
@@ -120,12 +100,51 @@ pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .build()?;
 
     attach_close_behavior(&window);
-    attach_dismiss_on_blur(&window);
+    start_dismiss_watchdog(app, &window);
     let position = panel_position(app, &window);
     let _ = window.set_position(position);
     let _ = window.show();
     let _ = window.set_focus();
     Ok(window)
+}
+
+/// Dismisses the panel after it has held and then lost focus. The
+/// `Focused(false)` event alone is not enough: when Windows refuses the
+/// foreground request no later click ever produces a focus event, so the panel
+/// could not be closed. Polling also retries the blocked focus request.
+fn start_dismiss_watchdog(app: &AppHandle, window: &WebviewWindow) {
+    let app = app.clone();
+    let window = window.clone();
+    tauri::async_runtime::spawn(async move {
+        let mut had_focus = false;
+        let mut focus_attempts = 0u32;
+        loop {
+            tokio::time::sleep(PANEL_WATCH_INTERVAL).await;
+            if app.get_webview_window(PANEL_LABEL).is_none() {
+                return;
+            }
+            if !window.is_visible().unwrap_or(false) {
+                had_focus = false;
+                focus_attempts = 0;
+                continue;
+            }
+            if window.is_focused().unwrap_or(false) {
+                had_focus = true;
+                continue;
+            }
+            if had_focus {
+                if let Ok(mut at) = PANEL_BLUR_AT.lock() {
+                    *at = Some(Instant::now());
+                }
+                let _ = window.destroy();
+                return;
+            }
+            if focus_attempts < 6 {
+                focus_attempts += 1;
+                let _ = window.set_focus();
+            }
+        }
+    });
 }
 
 pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
