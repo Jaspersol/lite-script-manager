@@ -22,7 +22,8 @@
       | "folder"
       | "file"
       | "download"
-      | "panel";
+      | "panel"
+      | "alert";
     size?: number;
     strokeWidth?: number;
   } = $props();
@@ -100,5 +101,9 @@
   {:else if name === "panel"}
     <rect x="3.5" y="4.5" width="17" height="15" rx="3"></rect>
     <path d="M9.5 4.5v15"></path>
+  {:else if name === "alert"}
+    <circle cx="12" cy="12" r="8.6"></circle>
+    <path d="M12 7.6v5.2"></path>
+    <path d="M12 16.4h.01"></path>
   {/if}
 </svg>

@@ -53,6 +53,19 @@ pub fn get_bool(conn: &Connection, key: &str, fallback: bool) -> bool {
         .unwrap_or(fallback)
 }
 
+/// True when the stored UI language is English. Used for native notifications
+/// that are composed on the Rust side.
+pub fn is_english(app: &tauri::AppHandle) -> bool {
+    use tauri::Manager;
+    let Some(state) = app.try_state::<crate::state::AppState>() else {
+        return false;
+    };
+    let Ok(conn) = state.db.lock() else {
+        return false;
+    };
+    get(&conn, "language").is_ok_and(|value| value == "en-US")
+}
+
 pub fn update(conn: &Connection, values: &HashMap<String, String>) -> Result<(), String> {
     for (key, value) in values {
         if !DEFAULTS.iter().any(|(name, _)| name == key) {

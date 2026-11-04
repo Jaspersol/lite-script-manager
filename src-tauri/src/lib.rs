@@ -881,14 +881,7 @@ pub fn run() {
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(Some(info)) = update::auto_check(&update_handle).await {
-                    triggers::notify(
-                        &update_handle,
-                        "发现新版本",
-                        &format!(
-                            "LiteScriptManager v{} 已发布，可在「设置 → 关于与更新」中安装",
-                            info.latest_version
-                        ),
-                    );
+                    windows::notify_new_version(&update_handle, &info.latest_version);
                     let _ = update_handle.emit("update-check-result", &info);
                 }
             });

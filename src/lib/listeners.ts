@@ -11,7 +11,7 @@ export function createListenerGroup() {
         else unlisteners.push(off);
       })
       .catch((error: unknown) => {
-        console.error(`事件监听失败: ${String(event)}`, error);
+        console.error(`Event listener failed: ${String(event)}`, error);
       });
   }
 

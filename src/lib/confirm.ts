@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 import { writable } from "svelte/store";
 
 export type ConfirmOptions = {
@@ -17,7 +18,7 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
     confirmRequest.update((previous) => {
       previous?.resolve(false);
       return {
-        confirmLabel: "确定",
+        confirmLabel: t("确定"),
         danger: false,
         ...options,
         resolve,

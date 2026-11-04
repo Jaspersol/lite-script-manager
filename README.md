@@ -180,7 +180,7 @@ Run history stores log paths and sizes, not log bodies. Log files are pruned by 
 
 - External process monitoring uses a 1-second snapshot diff by default, so very short-lived processes may be missed. A low-latency ETW/WMI mode is not included because it requires administrator setup
 - Network metrics are not sampled
-- The UI is currently Chinese. The language preference is stored for future localization
+- The UI is available in Simplified Chinese and English. Switch under Settings → Language; the tray panel and native notifications follow the setting. Some backend log files and a few detailed error suffixes remain in Chinese
 - Code signing and auto-update are not configured
 - Schedules and triggers need the app to keep running in the tray
 

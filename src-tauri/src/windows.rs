@@ -62,21 +62,40 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+/// Notifies that a newer release is available, in the configured UI language.
+pub fn notify_new_version(app: &AppHandle, latest_version: &str) {
+    if settings::is_english(app) {
+        crate::triggers::notify(
+            app,
+            "New version available",
+            &format!(
+                "LiteScriptManager v{latest_version} is available. Install it from Settings → About & updates"
+            ),
+        );
+    } else {
+        crate::triggers::notify(
+            app,
+            "发现新版本",
+            &format!("LiteScriptManager v{latest_version} 已发布，可在「设置 → 关于与更新」中安装"),
+        );
+    }
+}
+
 /// Runs a release check from the tray menu and reports the result.
 fn check_updates_in_background(app: &AppHandle) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
+        let english = settings::is_english(&handle);
         match crate::update::check(&handle).await {
             Ok(info) => {
                 let _ = handle.emit("update-check-result", &info);
                 if info.has_update {
+                    notify_new_version(&handle, &info.latest_version);
+                } else if english {
                     crate::triggers::notify(
                         &handle,
-                        "发现新版本",
-                        &format!(
-                            "LiteScriptManager v{} 已发布，可在「设置 → 关于与更新」中安装",
-                            info.latest_version
-                        ),
+                        "Check for updates",
+                        &format!("You're on the latest version, v{}", info.current_version),
                     );
                 } else {
                     crate::triggers::notify(
@@ -87,7 +106,12 @@ fn check_updates_in_background(app: &AppHandle) {
                 }
             }
             Err(error) => {
-                crate::triggers::notify(&handle, "检查更新失败", &error);
+                let title = if english {
+                    "Update check failed"
+                } else {
+                    "检查更新失败"
+                };
+                crate::triggers::notify(&handle, title, &error);
             }
         }
     });

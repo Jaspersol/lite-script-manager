@@ -1,3 +1,4 @@
+import { t } from "./i18n.svelte";
 import type { Script } from "./types";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -21,13 +22,15 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 export function statusLabel(value: string | null | undefined): string {
-  if (!value) return "未运行";
-  return STATUS_LABELS[value] ?? value;
+  if (!value) return t("未运行");
+  const label = STATUS_LABELS[value];
+  return label ? t(label) : value;
 }
 
 export function sourceLabel(value: string | null | undefined): string {
-  if (!value) return "未知";
-  return SOURCE_LABELS[value] ?? value;
+  if (!value) return t("未知");
+  const label = SOURCE_LABELS[value];
+  return label ? t(label) : value;
 }
 
 export function isBusyStatus(status: string): boolean {
@@ -39,7 +42,7 @@ export function isActiveStatus(status: string): boolean {
 }
 
 export function scriptName(scripts: Script[], id: string): string {
-  return scripts.find((script) => script.id === id)?.name ?? "已删除脚本";
+  return scripts.find((script) => script.id === id)?.name ?? t("已删除脚本");
 }
 
 export function formatLogLine(line: { stream: string; line: string }): string {

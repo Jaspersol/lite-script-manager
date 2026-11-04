@@ -84,6 +84,9 @@ button, input, textarea, select, summary { -webkit-tap-highlight-color: transpar
 }
 .textarea { resize: vertical; min-height: 96px; line-height: 1.6; }
 .label { display: block; color: var(--muted); font-size: 12px; margin-bottom: 6px; font-weight: 550; }
+.label-row { display: flex; align-items: center; gap: 5px; margin-bottom: 6px; min-width: 0; }
+.label-row .label { margin-bottom: 0; }
+.check-text { display: inline; }
 .field { margin-bottom: 16px; }
 .muted { color: var(--muted); }
 .tiny { font-size: 11px; }

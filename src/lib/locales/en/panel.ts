@@ -1,0 +1,15 @@
+export const panel: Record<string, string> = {
+  "关闭 (Esc)": "Close (Esc)",
+  "关闭": "Close",
+  "{count} 个运行中": "{count} running",
+  "已配置脚本": "Configured scripts",
+  "实时状态": "Live status",
+  "加载中…": "Loading…",
+  "还没有脚本": "No scripts yet",
+  "打开管理添加 →": "Open manager to add →",
+  "上次失败": "Last run failed",
+  "停止脚本": "Stop script",
+  "启动脚本": "Start script",
+  "全部停止": "Stop all",
+  "打开管理": "Open manager",
+};

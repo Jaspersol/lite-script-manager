@@ -3,6 +3,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import { getVersion } from "@tauri-apps/api/app";
   import { api, friendlyError } from "./lib/api";
+  import { i18n, t } from "./lib/i18n.svelte";
   import { isActiveStatus, isBusyStatus, scriptName, statusLabel } from "./lib/format";
   import { createListenerGroup } from "./lib/listeners";
   import Schedules from "./lib/Schedules.svelte";
@@ -10,6 +11,7 @@
   import History from "./lib/History.svelte";
   import SettingsPage from "./lib/SettingsPage.svelte";
   import Icon from "./lib/Icon.svelte";
+  import Hint from "./lib/Hint.svelte";
   import { pageAction } from "./lib/uiActions";
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
   import { confirmDialog } from "./lib/confirm";
@@ -55,22 +57,22 @@
   });
 
   const runningCount = $derived(scripts.filter((s) => isActiveStatus(s.status)).length);
-  const tabTitle = $derived({
+  const tabTitle = $derived(t({
     scripts: "脚本",
     schedules: "计划任务",
     triggers: "事件触发器",
     history: "运行历史",
     runtimes: "运行时环境",
     settings: "设置",
-  }[activeTab]);
-  const tabSubtitle = $derived({
+  }[activeTab]));
+  const tabSubtitle = $derived(t({
     scripts: "管理本机脚本，按顺序显示在托盘快捷面板中。",
     schedules: "Cron、固定间隔、一次性执行和退出后循环重启。",
     triggers: "进程快照差分、资源阈值、脚本生命周期和手动触发；进程轮询默认 1 秒。",
     history: "运行结果、退出码、耗时和日志尾部。",
     runtimes: "只检测，不安装；检测结果用于运行前预检。",
     settings: "应用、窗口、日志、监控与安全设置。",
-  }[activeTab]);
+  }[activeTab]));
 
   const runtimeNames = $derived(new Map(catalog.map((item) => [item.id, item.name] as const)));
 
@@ -108,6 +110,10 @@
     toastTimer = setTimeout(() => { toast = null; }, 4200);
   }
 
+  function joinMessage(head: string, body: string): string {
+    return `${head}${i18n.locale === "en-US" ? ": " : "："}${body}`;
+  }
+
   async function refreshScripts(showError = false) {
     try {
       scripts = await api.listScripts();
@@ -140,7 +146,7 @@
       const count = await api.adoptExternalRuns();
       if (count > 0) {
         await refreshScripts();
-        showToast(`已接管 ${count} 个运行中的脚本`);
+        showToast(t("已接管 {count} 个运行中的脚本", { count }));
       }
     } catch (error) {
       showToast(friendlyError(error), "error");
@@ -174,7 +180,7 @@
       const result = await open({
         multiple: false,
         directory: false,
-        filters: [{ name: "脚本文件", extensions: scriptExtensions }],
+        filters: [{ name: t("脚本文件"), extensions: scriptExtensions }],
       });
       if (typeof result === "string") selectedPath = result;
     } catch (error) {
@@ -189,7 +195,7 @@
       showAdd = false;
       selectedPath = "";
       await refreshScripts();
-      showToast("脚本已添加");
+      showToast(t("脚本已添加"));
     } catch (error) {
       showToast(friendlyError(error), "error");
     }
@@ -197,7 +203,7 @@
 
   async function createNewScript() {
     if (!newName.trim()) {
-      showToast("脚本名称不能为空", "error");
+      showToast(t("脚本名称不能为空"), "error");
       return;
     }
     try {
@@ -205,7 +211,7 @@
       showAdd = false;
       newName = "";
       await refreshScripts();
-      showToast("脚本已创建");
+      showToast(t("脚本已创建"));
     } catch (error) {
       showToast(friendlyError(error), "error");
     }
@@ -246,7 +252,7 @@
       await api.updateScript(editScript.id, edit);
       editScript = null;
       await refreshScripts();
-      showToast("脚本配置已保存");
+      showToast(t("脚本配置已保存"));
     } catch (error) {
       showToast(friendlyError(error), "error");
     }
@@ -258,7 +264,7 @@
       const hash = await api.pinScriptHash(editScript.id, !editScript.content_hash);
       editScript = { ...editScript, content_hash: hash };
       await refreshScripts();
-      showToast(hash ? "已固定脚本内容哈希" : "已取消哈希固定");
+      showToast(hash ? t("已固定脚本内容哈希") : t("已取消哈希固定"));
     } catch (error) {
       showToast(friendlyError(error), "error");
     }
@@ -278,16 +284,16 @@
 
   async function deleteScript(script: Script) {
     const ok = await confirmDialog({
-      title: "移除脚本",
-      message: `从列表中移除「${script.name}」？\n默认不会删除磁盘上的脚本文件。`,
-      confirmLabel: "移除",
+      title: t("移除脚本"),
+      message: t("从列表中移除「{name}」？\n默认不会删除磁盘上的脚本文件。", { name: script.name }),
+      confirmLabel: t("移除"),
       danger: true,
     });
     if (!ok) return;
     try {
       await api.deleteScript(script.id, false);
       await refreshScripts();
-      showToast("已从列表移除");
+      showToast(t("已从列表移除"));
     } catch (error) {
       showToast(friendlyError(error), "error");
     }
@@ -350,7 +356,7 @@
         ? { ...script, status: payload.status, last_error: payload.error, last_run_id: payload.run_id }
         : script);
       if (payload.status === "failed" && payload.error) {
-        showToast(`${scriptName(scripts, payload.script_id)}：${payload.error}`, "error");
+        showToast(joinMessage(scriptName(scripts, payload.script_id), payload.error), "error");
       }
     });
     listeners.add("scripts-changed", () => { refreshScripts(); });
@@ -358,10 +364,10 @@
       updateAvailable = event.payload.has_update ? event.payload.latest_version : null;
     });
     listeners.add<{ title: string; message: string }>("app-notification", (event) => {
-      showToast(`${event.payload.title}：${event.payload.message}`);
+      showToast(joinMessage(event.payload.title, event.payload.message));
     });
     listeners.add<{ trigger_name: string }>("trigger-fired", (event) => {
-      showToast(`触发器「${event.payload.trigger_name}」已执行`);
+      showToast(t("触发器「{name}」已执行", { name: event.payload.trigger_name }));
     });
     return () => listeners.dispose();
   });
@@ -375,40 +381,40 @@
       <div class="brand-mark">LS</div>
       <div>
         <div class="brand-name">LiteScriptManager</div>
-        <div class="brand-sub">轻量脚本管理器</div>
+        <div class="brand-sub">{t("轻量脚本管理器")}</div>
       </div>
     </div>
 
     <nav class="nav">
-      <button class:active={activeTab === "scripts"} title="脚本" onclick={() => switchTab("scripts")}>
-        <span class="nav-icon"><Icon name="grid" size={17} /></span> 脚本
+      <button class:active={activeTab === "scripts"} title={t("脚本")} onclick={() => switchTab("scripts")}>
+        <span class="nav-icon"><Icon name="grid" size={17} /></span> {t("脚本")}
         <span class="nav-count">{scripts.length}</span>
       </button>
-      <button class:active={activeTab === "schedules"} title="计划任务" onclick={() => switchTab("schedules")}>
-        <span class="nav-icon"><Icon name="clock" size={17} /></span> 计划任务
+      <button class:active={activeTab === "schedules"} title={t("计划任务")} onclick={() => switchTab("schedules")}>
+        <span class="nav-icon"><Icon name="clock" size={17} /></span> {t("计划任务")}
       </button>
-      <button class:active={activeTab === "triggers"} title="事件触发器" onclick={() => switchTab("triggers")}>
-        <span class="nav-icon"><Icon name="bolt" size={17} /></span> 事件触发器
+      <button class:active={activeTab === "triggers"} title={t("事件触发器")} onclick={() => switchTab("triggers")}>
+        <span class="nav-icon"><Icon name="bolt" size={17} /></span> {t("事件触发器")}
       </button>
-      <button class:active={activeTab === "history"} title="运行历史" onclick={() => switchTab("history")}>
-        <span class="nav-icon"><Icon name="history" size={17} /></span> 运行历史
+      <button class:active={activeTab === "history"} title={t("运行历史")} onclick={() => switchTab("history")}>
+        <span class="nav-icon"><Icon name="history" size={17} /></span> {t("运行历史")}
       </button>
-      <button class:active={activeTab === "runtimes"} title="运行时环境" onclick={() => switchTab("runtimes")}>
-        <span class="nav-icon"><Icon name="code" size={17} /></span> 运行时环境
+      <button class:active={activeTab === "runtimes"} title={t("运行时环境")} onclick={() => switchTab("runtimes")}>
+        <span class="nav-icon"><Icon name="code" size={17} /></span> {t("运行时环境")}
       </button>
-      <button class:active={activeTab === "settings"} title="设置" onclick={() => switchTab("settings")}>
-        <span class="nav-icon"><Icon name="sliders" size={17} /></span> 设置
-        {#if updateAvailable}<span class="nav-dot" title={`新版本 v${updateAvailable} 可用`}></span>{/if}
+      <button class:active={activeTab === "settings"} title={t("设置")} onclick={() => switchTab("settings")}>
+        <span class="nav-icon"><Icon name="sliders" size={17} /></span> {t("设置")}
+        {#if updateAvailable}<span class="nav-dot" title={t("新版本 v{version} 可用", { version: updateAvailable })}></span>{/if}
       </button>
     </nav>
 
     <div class="sidebar-bottom">
       <div class="mini-card">
-        <div class="mini-card-top"><span class="status-dot running"></span> 后台服务</div>
-        <div class="mini-card-value">{runningCount} 个脚本运行中</div>
-        <div class="mini-card-hint">关闭窗口不会停止脚本</div>
+        <div class="mini-card-top"><span class="status-dot running"></span> {t("后台服务")}</div>
+        <div class="mini-card-value">{t("{count} 个脚本运行中", { count: runningCount })}</div>
+        <div class="mini-card-hint">{t("关闭窗口不会停止脚本")}</div>
       </div>
-      <div class="version">v{appVersion || "—"} · 托盘常驻</div>
+      <div class="version">v{appVersion || "—"} · {t("托盘常驻")}</div>
     </div>
   </aside>
 
@@ -420,10 +426,10 @@
       </div>
       <div class="topbar-actions">
         {#if activeTab === "scripts"}
-          <button class="btn btn-ghost" onclick={openAddPath}><Icon name="folder" size={15} /> 从路径添加</button>
-          <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}><Icon name="plus" size={15} /> 新建脚本</button>
+          <button class="btn btn-ghost" onclick={openAddPath}><Icon name="folder" size={15} /> {t("从路径添加")}</button>
+          <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}><Icon name="plus" size={15} /> {t("新建脚本")}</button>
         {:else if activeTab === "runtimes"}
-          <button class="btn" disabled={runtimeLoading} onclick={() => loadRuntimes(true)}><Icon name="refresh" size={15} /> {runtimeLoading ? "检测中…" : "重新检测"}</button>
+          <button class="btn" disabled={runtimeLoading} onclick={() => loadRuntimes(true)}><Icon name="refresh" size={15} /> {runtimeLoading ? t("检测中…") : t("重新检测")}</button>
         {:else if $pageAction}
           <button
             class="btn"
@@ -443,22 +449,22 @@
         <div class="toolbar">
           <div class="search-wrap">
             <span class="search-icon"><Icon name="search" size={16} /></span>
-            <input class="input search" placeholder="搜索名称、路径或运行时…" bind:value={search} />
+            <input class="input search" placeholder={t("搜索名称、路径或运行时…")} bind:value={search} />
           </div>
-          <div class="toolbar-meta">{filteredScripts.length} 个脚本</div>
+          <div class="toolbar-meta">{t("{count} 个脚本", { count: filteredScripts.length })}</div>
         </div>
 
         {#if loading}
-          <div class="empty-state"><div class="spinner"></div>正在加载脚本…</div>
+          <div class="empty-state"><div class="spinner"></div>{t("正在加载脚本…")}</div>
         {:else if filteredScripts.length === 0}
           <div class="empty-state">
             <div class="empty-icon"><Icon name="grid" size={34} strokeWidth={1.25} /></div>
-            <h2>{scripts.length === 0 ? "还没有脚本" : "没有匹配的脚本"}</h2>
-            <p>{scripts.length === 0 ? "从已有文件添加，或直接创建一个新脚本。" : "换一个关键词试试。"}</p>
+            <h2>{scripts.length === 0 ? t("还没有脚本") : t("没有匹配的脚本")}</h2>
+            <p>{scripts.length === 0 ? t("从已有文件添加，或直接创建一个新脚本。") : t("换一个关键词试试。")}</p>
             {#if scripts.length === 0}
               <div class="empty-actions">
-                <button class="btn btn-ghost" onclick={openAddPath}>从路径添加</button>
-                <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}><Icon name="plus" size={15} /> 新建脚本</button>
+                <button class="btn btn-ghost" onclick={openAddPath}>{t("从路径添加")}</button>
+                <button class="btn btn-primary" onclick={() => { showAdd = true; addMode = "new"; }}><Icon name="plus" size={15} /> {t("新建脚本")}</button>
               </div>
             {/if}
           </div>
@@ -466,10 +472,10 @@
           <div class="script-list" role="list">
             <div class="list-head" role="presentation">
               <span class="col-drag"></span>
-              <span>脚本</span>
-              <span>运行时</span>
-              <span>状态</span>
-              <span class="col-actions">操作</span>
+              <span>{t("脚本")}</span>
+              <span>{t("运行时")}</span>
+              <span>{t("状态")}</span>
+              <span class="col-actions">{t("操作")}</span>
             </div>
             {#each filteredScripts as script, index (script.id)}
               <div
@@ -482,11 +488,11 @@
                 ondrop={(event) => onDrop(event, script.id)}
                 ondragend={() => { dragId = null; }}
               >
-                <span class="drag-handle" title="拖动排序">⠿</span>
+                <span class="drag-handle" title={t("拖动排序")}>⠿</span>
                 <div class="script-main">
                   <div class="script-name-line">
                     <span class="script-name">{script.name}</span>
-                    {#if !script.enabled}<span class="badge">已禁用</span>{/if}
+                    {#if !script.enabled}<span class="badge">{t("已禁用")}</span>{/if}
                     {#if script.last_error}<span class="error-dot" title={script.last_error}></span>{/if}
                   </div>
                   <div class="script-path mono" title={script.path}>{displayPath(script.path)}</div>
@@ -498,11 +504,11 @@
                 </div>
                 <div class="row-actions">
                   <button class="btn btn-sm run-btn" class:stop={script.status === "running"} disabled={!script.enabled || script.status === "starting" || script.status === "stopping" || script.status === "queued"} onclick={() => toggleScript(script)}>
-                    {#if script.status === "running"}<Icon name="stop" size={12} /> 停止{:else if script.status === "starting"}启动中…{:else if script.status === "stopping"}停止中…{:else if script.status === "queued"}排队中…{:else}<Icon name="play" size={12} /> 启动{/if}
+                    {#if script.status === "running"}<Icon name="stop" size={12} /> {t("停止")}{:else if script.status === "starting"}{t("启动中")}…{:else if script.status === "stopping"}{t("停止中")}…{:else if script.status === "queued"}{t("排队中")}…{:else}<Icon name="play" size={12} /> {t("启动")}{/if}
                   </button>
-                  <button class="icon-btn btn btn-ghost" title="设置" aria-label="脚本设置" onclick={() => openEdit(script)}><Icon name="sliders" size={15} /></button>
-                  <button class="icon-btn btn btn-ghost" title="编辑" aria-label="用记事本编辑脚本" onclick={() => editScriptFile(script)}><Icon name="edit" size={15} /></button>
-                  <button class="icon-btn btn btn-ghost" title="移除" aria-label="移除脚本" onclick={() => deleteScript(script)}><Icon name="trash" size={15} /></button>
+                  <button class="icon-btn btn btn-ghost" title={t("设置")} aria-label={t("脚本设置")} onclick={() => openEdit(script)}><Icon name="sliders" size={15} /></button>
+                  <button class="icon-btn btn btn-ghost" title={t("编辑")} aria-label={t("用记事本编辑脚本")} onclick={() => editScriptFile(script)}><Icon name="edit" size={15} /></button>
+                  <button class="icon-btn btn btn-ghost" title={t("移除")} aria-label={t("移除脚本")} onclick={() => deleteScript(script)}><Icon name="trash" size={15} /></button>
                 </div>
               </div>
             {/each}
@@ -518,17 +524,16 @@
     {:else if activeTab === "runtimes"}
       <section class="content">
         <div class="runtime-summary">
-          <div><strong>{runtimes.filter((r) => r.installed).length}</strong><span> 已就绪</span></div>
-          <div><strong>{runtimes.filter((r) => !r.installed).length}</strong><span> 未检测到</span></div>
-          <div class="muted tiny">仅检测，不安装、不修改 PATH</div>
+          <div><strong>{runtimes.filter((r) => r.installed).length}</strong><span> {t("已就绪")}</span></div>
+          <div><strong>{runtimes.filter((r) => !r.installed).length}</strong><span> {t("未检测到")}</span></div>
         </div>
         {#if runtimeLoading && runtimes.length === 0}
-          <div class="empty-state"><div class="spinner"></div>正在检测运行时…</div>
+          <div class="empty-state"><div class="spinner"></div>{t("正在检测运行时…")}</div>
         {:else if runtimes.length === 0}
           <div class="empty-state">
             <div class="empty-icon"><Icon name="code" size={34} strokeWidth={1.25} /></div>
-            <h2>尚未检测</h2><p>点击右上角“重新检测”开始扫描本机环境。</p>
-            <button class="btn btn-primary" onclick={() => loadRuntimes(true)}>开始检测</button>
+            <h2>{t("尚未检测")}</h2><p>{t("点击右上角“重新检测”开始扫描本机环境。")}</p>
+            <button class="btn btn-primary" onclick={() => loadRuntimes(true)}>{t("开始检测")}</button>
           </div>
         {:else}
           <div class="runtime-grid">
@@ -537,17 +542,17 @@
                 <div class="runtime-head">
                   <span class="status-dot" class:running={runtime.installed}></span>
                   <strong>{runtime.name}</strong>
-                  <span class="badge">{runtime.status === "multiple" ? `${runtime.candidates.length} 个安装` : runtime.installed ? "已就绪" : "未找到"}</span>
+                  <span class="badge">{runtime.status === "multiple" ? t("{count} 个安装", { count: runtime.candidates.length }) : runtime.installed ? t("已就绪") : t("未找到")}</span>
                 </div>
-                <div class="runtime-version">{runtime.version ? `v${runtime.version}` : runtime.installed ? "版本未知" : "—"}</div>
-                <div class="runtime-path mono" title={runtime.exe_path ?? ""}>{runtime.exe_path ?? "未检测到可执行文件"}</div>
+                <div class="runtime-version">{runtime.version ? `v${runtime.version}` : runtime.installed ? t("版本未知") : "—"}</div>
+                <div class="runtime-path mono" title={runtime.exe_path ?? ""}>{runtime.exe_path ?? t("未检测到可执行文件")}</div>
                 {#if runtime.error}<div class="runtime-error">{runtime.error}</div>{/if}
                 {#if runtime.details?.length}
                   <div class="runtime-details">{#each runtime.details as detail}<div>{detail}</div>{/each}</div>
                 {/if}
                 {#if runtime.candidates.length > 1}
                   <details class="runtime-candidates">
-                    <summary>{runtime.candidates.length} 个候选</summary>
+                    <summary>{t("{count} 个候选", { count: runtime.candidates.length })}</summary>
                     {#each runtime.candidates.slice(0, 6) as candidate}
                       <div class="candidate-row">
                         <span class="badge">{candidate.source}</span>
@@ -570,33 +575,32 @@
 
 {#if showAdd}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) showAdd = false; }}>
-    <div class="modal" role="dialog" aria-modal="true" aria-label="添加脚本">
-      <div class="modal-head"><div class="modal-title">添加脚本</div><button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => showAdd = false}><Icon name="close" size={17} /></button></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-label={t("添加脚本")}>
+      <div class="modal-head"><div class="modal-title">{t("添加脚本")}</div><button class="btn btn-ghost icon-btn" title={t("关闭")} aria-label={t("关闭")} onclick={() => showAdd = false}><Icon name="close" size={17} /></button></div>
       <div class="modal-body">
         <div class="segmented">
-          <button class:active={addMode === "path"} onclick={() => addMode = "path"}>从路径添加</button>
-          <button class:active={addMode === "new"} onclick={() => addMode = "new"}>新建脚本</button>
+          <button class:active={addMode === "path"} onclick={() => addMode = "path"}>{t("从路径添加")}</button>
+          <button class:active={addMode === "new"} onclick={() => addMode = "new"}>{t("新建脚本")}</button>
         </div>
         {#if addMode === "path"}
           <div class="path-picker">
-            <div class="path-value mono">{selectedPath || "尚未选择文件"}</div>
-            <button class="btn" onclick={choosePath}>选择脚本文件…</button>
+            <div class="path-value mono">{selectedPath || t("尚未选择文件")}</div>
+            <button class="btn" onclick={choosePath}>{t("选择脚本文件…")}</button>
+            <Hint text={t("根据扩展名自动识别运行时；文件保持在原位置，不会复制。")} />
           </div>
-          <p class="muted tiny">根据扩展名自动识别运行时；文件保持在原位置，不会复制。</p>
         {:else}
-          <div class="field"><label class="label" for="new-name">名称</label><input id="new-name" class="input" placeholder="例如：每日备份" bind:value={newName} /></div>
-          <div class="field"><label class="label" for="new-runtime">运行时</label>
+          <div class="field"><div class="label-row"><label class="label" for="new-name">{t("名称")}</label><Hint text={t("仅作为显示名称。新建的脚本文件会创建在应用脚本库目录中，之后可在脚本设置里替换为任意路径。")} /></div><input id="new-name" class="input" placeholder={t("例如：每日备份")} bind:value={newName} /></div>
+          <div class="field"><div class="label-row"><label class="label" for="new-runtime">{t("运行时")}</label><Hint text={t("决定新建文件的扩展名和默认模板，并指定用哪个解释器运行。")} /></div>
             <select id="new-runtime" class="select" bind:value={newRuntime} onchange={() => { newContent = templateFor(newRuntime); }}>
               {#each catalog as runtime (runtime.id)}<option value={runtime.id}>{runtime.name} ({runtime.extensions.join(", ")})</option>{/each}
             </select>
           </div>
-          <div class="field"><label class="label" for="new-content">初始内容</label><textarea id="new-content" class="textarea editor" bind:value={newContent}></textarea></div>
-          <p class="muted tiny">文件会创建在应用脚本库目录中；后续可替换为任意路径。</p>
+          <div class="field"><div class="label-row"><label class="label" for="new-content">{t("初始内容")}</label><Hint text={t("创建时写入文件的内容，可直接使用模板，也可以在保存后用记事本继续编辑。")} /></div><textarea id="new-content" class="textarea editor" bind:value={newContent}></textarea></div>
         {/if}
       </div>
       <div class="modal-foot">
-        <button class="btn" onclick={() => showAdd = false}>取消</button>
-        <button class="btn btn-primary" disabled={addMode === "path" ? !selectedPath : !newName.trim()} onclick={addMode === "path" ? addFromPath : createNewScript}>添加</button>
+        <button class="btn" onclick={() => showAdd = false}>{t("取消")}</button>
+        <button class="btn btn-primary" disabled={addMode === "path" ? !selectedPath : !newName.trim()} onclick={addMode === "path" ? addFromPath : createNewScript}>{t("添加")}</button>
       </div>
     </div>
   </div>
@@ -604,69 +608,68 @@
 
 {#if editScript}
   <div class="modal-backdrop" role="presentation" onclick={(event) => { if (event.target === event.currentTarget) editScript = null; }}>
-    <div class="modal" role="dialog" aria-modal="true" aria-label="脚本设置">
-      <div class="modal-head"><div class="modal-title">脚本设置</div><button class="btn btn-ghost icon-btn" title="关闭" aria-label="关闭" onclick={() => editScript = null}><Icon name="close" size={17} /></button></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-label={t("脚本设置")}>
+      <div class="modal-head"><div class="modal-title">{t("脚本设置")}</div><button class="btn btn-ghost icon-btn" title={t("关闭")} aria-label={t("关闭")} onclick={() => editScript = null}><Icon name="close" size={17} /></button></div>
       <div class="modal-body">
-        <div class="field"><label class="label" for="edit-name">名称</label><input id="edit-name" class="input" bind:value={editScript.name} /></div>
-        <div class="field"><div class="label">路径</div><div class="path-value mono">{editScript.path}</div></div>
-        <div class="field"><label class="label" for="edit-args">参数（每行一个）</label><textarea id="edit-args" class="textarea small" bind:value={editArgsText}></textarea></div>
-        <div class="field"><label class="label" for="edit-cwd">工作目录（可选）</label><input id="edit-cwd" class="input mono" bind:value={editScript.cwd} /></div>
-        <div class="field"><label class="label" for="edit-interpreter">解释器路径（可选）</label><input id="edit-interpreter" class="input mono" placeholder="留空则使用自动检测结果" bind:value={editInterpreterPath} /></div>
-        <div class="field"><label class="label" for="edit-process-match">进程匹配（可选）</label><input id="edit-process-match" class="input mono" placeholder="例如：pi-web；留空则按脚本路径匹配" bind:value={editProcessMatch} /><div class="muted tiny" style="margin-top:4px">VBS、批处理等启动器脚本会很快退出。重启应用后要识别它拉起的常驻进程，请填写该进程命令行里的特征字符串。</div></div>
+        <div class="field"><div class="label-row"><label class="label" for="edit-name">{t("名称")}</label><Hint text={t("显示在脚本列表和快捷面板中的名称，不影响实际文件。")} /></div><input id="edit-name" class="input" bind:value={editScript.name} /></div>
+        <div class="field"><div class="label-row"><div class="label">{t("路径")}</div><Hint text={t("脚本文件的实际位置，由应用直接以该路径运行，文件不会被复制或移动。")} /></div><div class="path-value mono">{editScript.path}</div></div>
+        <div class="field"><div class="label-row"><label class="label" for="edit-args">{t("参数（每行一个）")}</label><Hint text={t("每行一个参数，按顺序传给脚本；含空格的参数会作为一个整体传递。")} /></div><textarea id="edit-args" class="textarea small" bind:value={editArgsText}></textarea></div>
+        <div class="field"><div class="label-row"><label class="label" for="edit-cwd">{t("工作目录（可选）")}</label><Hint text={t("脚本启动时的工作目录；留空则使用脚本文件所在目录。脚本内的相对路径都以此目录为基准。")} /></div><input id="edit-cwd" class="input mono" bind:value={editScript.cwd} /></div>
+        <div class="field"><div class="label-row"><label class="label" for="edit-interpreter">{t("解释器路径（可选）")}</label><Hint text={t("留空则使用运行时检测到的解释器；可指定其他解释器路径或兼容版本。")} /></div><input id="edit-interpreter" class="input mono" placeholder={t("留空则使用自动检测结果")} bind:value={editInterpreterPath} /></div>
+        <div class="field"><div class="label-row"><label class="label" for="edit-process-match">{t("进程匹配（可选）")}</label><Hint text={t("VBS、批处理等启动器脚本会很快退出。重启应用后要识别它拉起的常驻进程，请填写该进程命令行里的特征字符串；留空则按脚本路径匹配。")} /></div><input id="edit-process-match" class="input mono" placeholder={t("例如：pi-web；留空则按脚本路径匹配")} bind:value={editProcessMatch} /></div>
         <div class="form-grid">
-          <div class="field"><label class="label" for="edit-stop-timeout">停止超时（秒）</label><input id="edit-stop-timeout" class="input" type="number" min="1" max="60" bind:value={editScript.stop_timeout_sec} /></div>
-          <div class="field"><label class="label" for="edit-max-runtime">最大运行秒数（可选）</label><input id="edit-max-runtime" class="input" type="number" min="0" placeholder="留空不限制" bind:value={editScript.timeout_sec} /></div>
+          <div class="field"><div class="label-row"><label class="label" for="edit-stop-timeout">{t("停止超时（秒）")}</label><Hint text={t("请求停止后等待进程退出的秒数，超时仍未退出则强制结束，可填 1-60。")} /></div><input id="edit-stop-timeout" class="input" type="number" min="1" max="60" bind:value={editScript.stop_timeout_sec} /></div>
+          <div class="field"><div class="label-row"><label class="label" for="edit-max-runtime">{t("最大运行秒数（可选）")}</label><Hint text={t("运行超过该时长会被自动结束并记为失败；留空表示不限制。")} /></div><input id="edit-max-runtime" class="input" type="number" min="0" placeholder={t("留空不限制")} bind:value={editScript.timeout_sec} /></div>
         </div>
         <div class="form-grid">
-          <div class="field"><label class="label" for="edit-stop-mode">停止方式</label>
+          <div class="field"><div class="label-row"><label class="label" for="edit-stop-mode">{t("停止方式")}</label><Hint text={t("优雅停止会先请求进程正常退出，等待超时后再强杀；立即强制终止会直接结束进程，可能丢失未保存的数据。")} /></div>
             <select id="edit-stop-mode" class="select" bind:value={editScript.stop_mode}>
-              <option value="graceful">优雅停止，超时强杀</option>
-              <option value="force">立即强制终止</option>
+              <option value="graceful">{t("优雅停止，超时强杀")}</option>
+              <option value="force">{t("立即强制终止")}</option>
             </select>
           </div>
-          <div class="field"><label class="label" for="edit-success">成功退出码</label><input id="edit-success" class="input mono" bind:value={editScript.success_codes} placeholder="0 或 0,2,10-12" /></div>
+          <div class="field"><div class="label-row"><label class="label" for="edit-success">{t("成功退出码")}</label><Hint text={t("判定运行成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12。")} /></div><input id="edit-success" class="input mono" bind:value={editScript.success_codes} placeholder={t("0 或 0,2,10-12")} /></div>
         </div>
         <div class="form-grid">
-          <div class="field"><label class="label" for="edit-instance-policy">实例策略</label>
+          <div class="field"><div class="label-row"><label class="label" for="edit-instance-policy">{t("实例策略")}</label><Hint text={t("同一脚本已有实例在运行时的处理方式：允许并行、跳过本次、排队等待，或停止旧实例后启动。")} /></div>
             <select id="edit-instance-policy" class="select" bind:value={editScript.instance_policy}>
-              <option value="parallel">允许并行</option>
-              <option value="skip">已有实例时跳过</option>
-              <option value="queue">排队等待</option>
-              <option value="replace">停止旧实例后启动</option>
+              <option value="parallel">{t("允许并行")}</option>
+              <option value="skip">{t("已有实例时跳过")}</option>
+              <option value="queue">{t("排队等待")}</option>
+              <option value="replace">{t("停止旧实例后启动")}</option>
             </select>
           </div>
-          <div class="field"><label class="label" for="edit-max-instances">最大实例数</label><input id="edit-max-instances" class="input" type="number" min="1" max="32" bind:value={editScript.max_instances} /></div>
+          <div class="field"><div class="label-row"><label class="label" for="edit-max-instances">{t("最大实例数")}</label><Hint text={t("允许同时运行的实例上限，超出后按实例策略处理，可填 1-32。")} /></div><input id="edit-max-instances" class="input" type="number" min="1" max="32" bind:value={editScript.max_instances} /></div>
         </div>
         <div class="field">
-          <div class="label">内容哈希</div>
+          <div class="label-row"><div class="label">{t("内容哈希")}</div><Hint text={t("固定后，设置中的“运行前校验”开启时会在每次启动前检查脚本是否被替换；文件改动后需重新固定。")} /></div>
           <div class="hash-row">
-            <span class="mono tiny">{editScript.content_hash ?? "未固定"}</span>
-            <button class="btn btn-sm" onclick={toggleHashPin}>{editScript.content_hash ? "取消固定" : "固定当前内容"}</button>
+            <span class="mono tiny">{editScript.content_hash ?? t("未固定")}</span>
+            <button class="btn btn-sm" onclick={toggleHashPin}>{editScript.content_hash ? t("取消固定") : t("固定当前内容")}</button>
           </div>
-          <p class="muted tiny">固定后，设置中的“运行前校验”开启时会在每次启动前检查脚本是否被替换。</p>
         </div>
-        <label class="check-row"><input type="checkbox" bind:checked={editScript.enabled} /> 启用此脚本（显示在快捷面板中）</label>
+        <label class="check-row"><input type="checkbox" bind:checked={editScript.enabled} /> <span class="check-text">{t("启用此脚本（显示在快捷面板中）")}<Hint text={t("禁用后脚本不出现在快捷面板且不能被计划或触发器启动，配置仍保留。")} /></span></label>
       </div>
-      <div class="modal-foot"><button class="btn" onclick={() => editScript = null}>取消</button><button class="btn btn-primary" onclick={saveEdit}>保存</button></div>
+      <div class="modal-foot"><button class="btn" onclick={() => editScript = null}>{t("取消")}</button><button class="btn btn-primary" onclick={saveEdit}>{t("保存")}</button></div>
     </div>
   </div>
 {/if}
 
 {#if firstRun}
   <div class="modal-backdrop" role="presentation">
-    <div class="modal" role="dialog" aria-modal="true" aria-label="首次启动">
-      <div class="modal-head"><div class="modal-title">欢迎使用 LiteScriptManager</div></div>
+    <div class="modal" role="dialog" aria-modal="true" aria-label={t("首次启动")}>
+      <div class="modal-head"><div class="modal-title">{t("欢迎使用 LiteScriptManager")}</div></div>
       <div class="modal-body">
-        <p class="first-run-lead">托盘常驻、按需创建 WebView。关闭窗口不会停止脚本，退出应用才会停止全部受管进程。</p>
+        <p class="first-run-lead">{t("托盘常驻、按需创建 WebView。关闭窗口不会停止脚本，退出应用才会停止全部受管进程。")}</p>
         <div class="first-run-list">
-          <div><strong>1. 添加脚本</strong><span>支持 14 种运行时，自动检测解释器，不安装、不修改 PATH。</span></div>
-          <div><strong>2. 设置计划与触发器</strong><span>定时、循环重启、进程/资源事件都可以启动或停止脚本。</span></div>
-          <div><strong>3. 查看历史与日志</strong><span>每次运行都有独立日志文件，历史和日志按保留策略清理。</span></div>
+          <div><strong>{t("1. 添加脚本")}</strong><span>{t("支持 14 种运行时，自动检测解释器，不安装、不修改 PATH。")}</span></div>
+          <div><strong>{t("2. 设置计划与触发器")}</strong><span>{t("定时、循环重启、进程/资源事件都可以启动或停止脚本。")}</span></div>
+          <div><strong>{t("3. 查看历史与日志")}</strong><span>{t("每次运行都有独立日志文件，历史和日志按保留策略清理。")}</span></div>
         </div>
-        <p class="muted tiny">安全提示：脚本以当前用户权限运行，不默认提升管理员权限。可在设置中限制脚本根目录并固定内容哈希。</p>
+        <p class="muted tiny">{t("安全提示：脚本以当前用户权限运行，不默认提升管理员权限。可在设置中限制脚本根目录并固定内容哈希。")}</p>
       </div>
       <div class="modal-foot">
-        <button class="btn btn-primary" disabled={firstRunSaving} onclick={dismissFirstRun}>{firstRunSaving ? "保存中…" : "开始使用"}</button>
+        <button class="btn btn-primary" disabled={firstRunSaving} onclick={dismissFirstRun}>{firstRunSaving ? t("保存中…") : t("开始使用")}</button>
       </div>
     </div>
   </div>
@@ -786,7 +789,6 @@
   }
   .runtime-summary strong { font-size: 21px; color: #333941; margin-right: 3px; font-weight: 550; letter-spacing: -.3px; }
   .runtime-summary span { color: #7f8793; font-size: 11.5px; }
-  .runtime-summary .tiny { margin-left: auto; color: var(--faint); }
   .runtime-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
   .runtime-card {
     padding: 16px; border: 1px solid var(--line-soft); border-radius: 16px; background: #fff; min-width: 0;

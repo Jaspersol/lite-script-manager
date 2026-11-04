@@ -3,6 +3,7 @@
   import { onMount } from "svelte";
   import { api, formatBytes, formatDuration, formatTime, friendlyError } from "./api";
   import { formatLogLine, sourceLabel, statusLabel } from "./format";
+  import { t, tBackend } from "./i18n.svelte";
   import { createListenerGroup } from "./listeners";
   import Icon from "./Icon.svelte";
   import { pageAction } from "./uiActions";
@@ -72,9 +73,9 @@
 
   async function clearHistory() {
     const ok = await confirmDialog({
-      title: "清空运行历史",
-      message: "清空全部运行历史？日志文件仍会保留，可在设置中调整日志保留策略。",
-      confirmLabel: "清空",
+      title: t("清空运行历史"),
+      message: t("清空全部运行历史？日志文件仍会保留，可在设置中调整日志保留策略。"),
+      confirmLabel: t("清空"),
       danger: true,
     });
     if (!ok) return;
@@ -85,7 +86,7 @@
       pageSize = 200;
       await api.setLogStreaming(false);
       await load();
-      notify(`已清理 ${count} 条历史记录`);
+      notify(t("已清理 {count} 条历史记录", { count }));
     } catch (error) {
       notify(friendlyError(error), "error");
     }
@@ -105,7 +106,7 @@
 
   $effect(() => {
     const action: PageAction = {
-      label: "清空历史",
+      label: t("清空历史"),
       icon: "trash",
       kind: "danger",
       run: clearHistory,
@@ -145,29 +146,29 @@
 <div>
   <div class="filter-row">
     <select class="select" bind:value={scriptFilter} onchange={setFilter}>
-      <option value="">全部脚本</option>
+      <option value="">{t("全部脚本")}</option>
       {#each scripts as script (script.id)}<option value={script.id}>{script.name}</option>{/each}
     </select>
     <select class="select" bind:value={statusFilter} onchange={setFilter}>
-      <option value="">全部状态</option>
-      <option value="running">运行中</option><option value="queued">排队中</option><option value="starting">启动中</option><option value="stopping">停止中</option><option value="stopped">已停止</option><option value="exited">已结束</option><option value="failed">失败</option>
+      <option value="">{t("全部状态")}</option>
+      <option value="running">{t("运行中")}</option><option value="queued">{t("排队中")}</option><option value="starting">{t("启动中")}</option><option value="stopping">{t("停止中")}</option><option value="stopped">{t("已停止")}</option><option value="exited">{t("已结束")}</option><option value="failed">{t("失败")}</option>
     </select>
     <select class="select" bind:value={sourceFilter} onchange={setFilter}>
-      <option value="">全部来源</option>
-      <option value="manual">手动</option><option value="schedule">定时</option><option value="loop">循环</option><option value="trigger">触发器</option><option value="adopted">接管</option>
+      <option value="">{t("全部来源")}</option>
+      <option value="manual">{t("手动")}</option><option value="schedule">{t("定时")}</option><option value="loop">{t("循环")}</option><option value="trigger">{t("触发器")}</option><option value="adopted">{t("接管")}</option>
     </select>
-    <button class="btn" onclick={load}><Icon name="refresh" size={14} /> 刷新</button>
+    <button class="btn" onclick={load}><Icon name="refresh" size={14} /> {t("刷新")}</button>
   </div>
 
   <div class="history-layout">
     <div class="history-list">
       {#if loading}
-        <div class="empty-state small"><div class="spinner"></div>正在加载历史…</div>
+        <div class="empty-state small"><div class="spinner"></div>{t("正在加载历史…")}</div>
       {:else if runs.length === 0}
-        <div class="empty-state small"><h2>没有运行记录</h2><p>手动或自动运行脚本后会出现在这里。</p></div>
+        <div class="empty-state small"><h2>{t("没有运行记录")}</h2><p>{t("手动或自动运行脚本后会出现在这里。")}</p></div>
       {:else}
         <div class="table-card">
-          <div class="table-head run-grid"><span>开始时间</span><span>脚本</span><span>来源</span><span>状态</span><span>耗时</span><span>退出码</span><span class="right">日志</span></div>
+          <div class="table-head run-grid"><span>{t("开始时间")}</span><span>{t("脚本")}</span><span>{t("来源")}</span><span>{t("状态")}</span><span>{t("耗时")}</span><span>{t("退出码")}</span><span class="right">{t("日志")}</span></div>
           {#each runs as run (run.id)}
             <button class="table-row run-grid run-row" class:selected={selected?.id === run.id} onclick={() => selectRun(run)}>
               <span class="cell-sub">{formatTime(run.started_at)}</span>
@@ -176,12 +177,12 @@
               <span><span class="badge" class:ok={run.status === "running" || run.status === "exited"} class:bad={run.status === "failed"}>{statusLabel(run.status)}</span></span>
               <span class="cell-sub">{formatDuration(run.started_at, run.ended_at)}</span>
               <span class="mono tiny">{run.exit_code ?? "—"}</span>
-              <span class="right"><span class="log-open" role="button" tabindex="0" title="打开完整日志" aria-label="打开完整日志" onclick={(event) => { event.stopPropagation(); openFullLog(run); }} onkeydown={(event) => { if (event.key === "Enter") { event.stopPropagation(); openFullLog(run); } }}><Icon name="file" size={14} /></span></span>
+              <span class="right"><span class="log-open" role="button" tabindex="0" title={t("打开完整日志")} aria-label={t("打开完整日志")} onclick={(event) => { event.stopPropagation(); openFullLog(run); }} onkeydown={(event) => { if (event.key === "Enter") { event.stopPropagation(); openFullLog(run); } }}><Icon name="file" size={14} /></span></span>
             </button>
           {/each}
         </div>
         {#if runs.length >= pageSize}
-          <button class="btn load-more" onclick={loadMore}>加载更多</button>
+          <button class="btn load-more" onclick={loadMore}>{t("加载更多")}</button>
         {/if}
       {/if}
     </div>
@@ -196,22 +197,22 @@
           <span class="badge">{statusLabel(selected.status)}</span>
         </div>
         <div class="detail-grid">
-          <span>来源</span><strong>{sourceLabel(selected.source)}</strong>
+          <span>{t("来源")}</span><strong>{sourceLabel(selected.source)}</strong>
           <span>PID</span><strong>{selected.pid ?? "—"}</strong>
-          <span>耗时</span><strong>{formatDuration(selected.started_at, selected.ended_at)}</strong>
-          <span>退出码</span><strong>{selected.exit_code ?? "—"}</strong>
-          <span>停止原因</span><strong>{selected.stop_reason ?? "—"}</strong>
-          <span>峰值内存</span><strong>{formatBytes(selected.peak_memory_bytes)}</strong>
-          <span>CPU 时间</span><strong>{selected.cpu_time_ms != null ? `${(selected.cpu_time_ms / 1000).toFixed(1)}s` : "—"}</strong>
-          <span>日志大小</span><strong>{formatBytes(selected.log_bytes)}</strong>
+          <span>{t("耗时")}</span><strong>{formatDuration(selected.started_at, selected.ended_at)}</strong>
+          <span>{t("退出码")}</span><strong>{selected.exit_code ?? "—"}</strong>
+          <span>{t("停止原因")}</span><strong>{selected.stop_reason ? tBackend(selected.stop_reason) : "—"}</strong>
+          <span>{t("峰值内存")}</span><strong>{formatBytes(selected.peak_memory_bytes)}</strong>
+          <span>{t("CPU 时间")}</span><strong>{selected.cpu_time_ms != null ? `${(selected.cpu_time_ms / 1000).toFixed(1)}s` : "—"}</strong>
+          <span>{t("日志大小")}</span><strong>{formatBytes(selected.log_bytes)}</strong>
         </div>
-        {#if selected.error}<div class="detail-error">{selected.error}</div>{/if}
-        <div class="detail-head log-head"><strong>日志尾部</strong><button class="btn btn-sm" onclick={() => openFullLog(selected!)}>打开完整日志</button></div>
+        {#if selected.error}<div class="detail-error">{tBackend(selected.error)}</div>{/if}
+        <div class="detail-head log-head"><strong>{t("日志尾部")}</strong><button class="btn btn-sm" onclick={() => openFullLog(selected!)}>{t("打开完整日志")}</button></div>
         <div class="log-view mono">
           {#if logLoading}
-            <div class="log-empty">正在读取…</div>
+            <div class="log-empty">{t("正在读取…")}</div>
           {:else if logLines.length === 0}
-            <div class="log-empty">没有日志输出。</div>
+            <div class="log-empty">{t("没有日志输出。")}</div>
           {:else}
             {#each logLines as line, index (index)}<div class="log-line">{line}</div>{/each}
           {/if}
@@ -219,7 +220,7 @@
       {:else}
         <div class="detail-placeholder">
           <div class="empty-icon"><Icon name="file" size={28} strokeWidth={1.25} /></div>
-          <p>选择一条运行记录查看退出码、耗时和日志尾部。</p>
+          <p>{t("选择一条运行记录查看退出码、耗时和日志尾部。")}</p>
         </div>
       {/if}
     </aside>

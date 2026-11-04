@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from "./i18n.svelte";
   import { confirmRequest } from "./confirm";
 
   let confirmButton: HTMLButtonElement | undefined = $state();
@@ -31,7 +32,7 @@
       <div class="modal-head"><div class="modal-title">{$confirmRequest.title}</div></div>
       <div class="modal-body"><p class="confirm-message">{$confirmRequest.message}</p></div>
       <div class="modal-foot">
-        <button class="btn" onclick={() => answer(false)}>取消</button>
+        <button class="btn" onclick={() => answer(false)}>{t("取消")}</button>
         <button
           bind:this={confirmButton}
           class="btn"

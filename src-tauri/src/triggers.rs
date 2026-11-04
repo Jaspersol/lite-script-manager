@@ -383,7 +383,11 @@ fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<Strin
                         &action.title
                     },
                     if action.message.is_empty() {
-                        "触发器已触发"
+                        if crate::settings::is_english(app) {
+                            "Trigger fired"
+                        } else {
+                            "触发器已触发"
+                        }
                     } else {
                         &action.message
                     },

@@ -5,6 +5,7 @@
   import { createListenerGroup } from "./lib/listeners";
   import Icon from "./lib/Icon.svelte";
   import type { RunStateEvent, RuntimeMeta, Script } from "./lib/types";
+  import { t } from "./lib/i18n.svelte";
 
   let scripts: Script[] = $state([]);
   let catalog: RuntimeMeta[] = $state([]);
@@ -106,23 +107,23 @@
       </div>
       <div class="panel-head-actions">
         <span class="count-badge">{scripts.length}</span>
-        <button class="close-btn" title="关闭 (Esc)" aria-label="关闭" onclick={closePanel}><Icon name="close" size={16} /></button>
+        <button class="close-btn" title={t("关闭 (Esc)")} aria-label={t("关闭")} onclick={closePanel}><Icon name="close" size={16} /></button>
       </div>
     </header>
 
     <div class="panel-subhead">
-      <span>{runningCount > 0 ? `${runningCount} 个运行中` : "已配置脚本"}</span>
-      <span class="live-hint"><span class="pulse"></span>实时状态</span>
+      <span>{runningCount > 0 ? t("{count} 个运行中", { count: runningCount }) : t("已配置脚本")}</span>
+      <span class="live-hint"><span class="pulse"></span>{t("实时状态")}</span>
     </div>
 
     <main class="panel-list">
       {#if loading}
-        <div class="panel-loading"><span class="spinner"></span>加载中…</div>
+        <div class="panel-loading"><span class="spinner"></span>{t("加载中…")}</div>
       {:else if scripts.length === 0}
         <div class="panel-empty">
           <div class="empty-mark"><Icon name="grid" size={28} strokeWidth={1.3} /></div>
-          <div>还没有脚本</div>
-          <button class="panel-link" onclick={openMain}>打开管理添加 →</button>
+          <div>{t("还没有脚本")}</div>
+          <button class="panel-link" onclick={openMain}>{t("打开管理添加 →")}</button>
         </div>
       {:else}
         {#each scripts as script (script.id)}
@@ -132,14 +133,14 @@
               <div class="row-name" title={script.name}>{script.name}</div>
               <div class="row-meta">
                 <span>{runtimeLabel(script.runtime_id)}</span>
-                {#if script.last_error}<span class="row-error" title={script.last_error}>上次失败</span>{/if}
+                {#if script.last_error}<span class="row-error" title={script.last_error}>{t("上次失败")}</span>{/if}
               </div>
             </div>
             <button
               class="toggle-btn"
               class:running={script.status === "running"}
               disabled={!script.enabled || isBusy(script)}
-              title={script.status === "running" ? "停止脚本" : "启动脚本"}
+              title={script.status === "running" ? t("停止脚本") : t("启动脚本")}
               onclick={() => toggle(script)}
             >
               {#if isBusy(script)}<span class="btn-spinner"></span>
@@ -156,8 +157,8 @@
     {/if}
 
     <footer class="panel-foot">
-      <button class="foot-btn" onclick={stopAll}>全部停止</button>
-      <button class="foot-btn primary" onclick={openMain}>打开管理</button>
+      <button class="foot-btn" onclick={stopAll}>{t("全部停止")}</button>
+      <button class="foot-btn primary" onclick={openMain}>{t("打开管理")}</button>
     </footer>
   </div>
 </div>

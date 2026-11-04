@@ -1,3 +1,4 @@
+import { i18n, tBackend } from "./i18n.svelte";
 import { invoke } from "@tauri-apps/api/core";
 import type {
   RunRecord,
@@ -71,14 +72,14 @@ export const api = {
 };
 
 export function friendlyError(error: unknown): string {
-  if (typeof error === "string") return error;
-  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return tBackend(error);
+  if (error instanceof Error) return tBackend(error.message);
   return String(error);
 }
 
 export function formatTime(value: number | null | undefined): string {
   if (!value) return "—";
-  return new Date(value).toLocaleString("zh-CN", { hour12: false });
+  return new Date(value).toLocaleString(i18n.locale, { hour12: false });
 }
 
 export function formatDuration(start: number | null, end: number | null): string {
