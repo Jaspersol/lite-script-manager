@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
+  import { getVersion } from "@tauri-apps/api/app";
   import { api, friendlyError } from "./lib/api";
   import { isActiveStatus, isBusyStatus, scriptName, statusLabel } from "./lib/format";
   import { createListenerGroup } from "./lib/listeners";
@@ -12,7 +13,7 @@
   import { pageAction } from "./lib/uiActions";
   import ConfirmDialog from "./lib/ConfirmDialog.svelte";
   import { confirmDialog } from "./lib/confirm";
-  import type { RunStateEvent, RuntimeInfo, RuntimeMeta, Script, ScriptEdit, Settings } from "./lib/types";
+  import type { RunStateEvent, RuntimeInfo, RuntimeMeta, Script, ScriptEdit, Settings, UpdateInfo } from "./lib/types";
 
   type Tab = "scripts" | "schedules" | "triggers" | "history" | "runtimes" | "settings";
 
@@ -40,6 +41,8 @@
   let dragId: string | null = $state(null);
   let firstRun = $state(false);
   let firstRunSaving = $state(false);
+  let appVersion = $state("");
+  let updateAvailable = $state<string | null>(null);
 
   const scriptExtensions = ["py", "js", "mjs", "cjs", "sh", "bash", "pl", "php", "R", "r", "lua", "bat", "cmd", "ps1", "vbs", "vbe", "wsf", "ahk", "au3"];
 
@@ -332,6 +335,11 @@
     loadCatalog();
     refreshScripts(true).finally(() => { loading = false; });
     adoptExternalRuns();
+    getVersion().then((value) => { appVersion = value; }).catch(() => {});
+    // The backend already checked for updates at startup; reuse that result.
+    api.lastUpdateResult().then((info) => {
+      if (info?.has_update) updateAvailable = info.latest_version;
+    }).catch(() => {});
     api.getSettings().then((settings: Settings) => {
       if (settings.first_run_done !== "true") firstRun = true;
     }).catch(() => {});
@@ -346,6 +354,9 @@
       }
     });
     listeners.add("scripts-changed", () => { refreshScripts(); });
+    listeners.add<UpdateInfo>("update-check-result", (event) => {
+      updateAvailable = event.payload.has_update ? event.payload.latest_version : null;
+    });
     listeners.add<{ title: string; message: string }>("app-notification", (event) => {
       showToast(`${event.payload.title}：${event.payload.message}`);
     });
@@ -387,6 +398,7 @@
       </button>
       <button class:active={activeTab === "settings"} title="设置" onclick={() => switchTab("settings")}>
         <span class="nav-icon"><Icon name="sliders" size={17} /></span> 设置
+        {#if updateAvailable}<span class="nav-dot" title={`新版本 v${updateAvailable} 可用`}></span>{/if}
       </button>
     </nav>
 
@@ -396,7 +408,7 @@
         <div class="mini-card-value">{runningCount} 个脚本运行中</div>
         <div class="mini-card-hint">关闭窗口不会停止脚本</div>
       </div>
-      <div class="version">v0.1.0 · 托盘常驻</div>
+      <div class="version">v{appVersion || "—"} · 托盘常驻</div>
     </div>
   </aside>
 
@@ -696,6 +708,7 @@
   .nav button.active .nav-icon { color: #5a79c4; }
   .nav-count { margin-left: auto; font-size: 10.5px; color: #939aa5; padding: 1px 2px; }
   .nav button.active .nav-count { color: #6d84b8; }
+  .nav-dot { margin-left: auto; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px rgba(100, 132, 232, .16); }
   .sidebar-bottom { margin-top: auto; }
   .mini-card {
     border: 1px solid var(--line-soft); background: rgba(255, 255, 255, .8);

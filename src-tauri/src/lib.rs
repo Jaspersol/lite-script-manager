@@ -10,6 +10,7 @@ mod scheduler;
 mod settings;
 mod state;
 mod triggers;
+mod update;
 mod windows;
 
 use models::{
@@ -22,6 +23,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
+use update::UpdateInfo;
 use uuid::Uuid;
 
 fn now_ms() -> i64 {
@@ -427,7 +429,8 @@ async fn get_run_log(
 }
 
 #[cfg(windows)]
-fn spawn_opener(program: &str, path: &str) -> Result<(), String> {
+pub(crate) fn spawn_opener(program: &str, path: &str) -> Result<(), String> {
+    // Used by the updater module as well.
     std::process::Command::new(program)
         .arg(path)
         .spawn()
@@ -436,7 +439,7 @@ fn spawn_opener(program: &str, path: &str) -> Result<(), String> {
 }
 
 #[cfg(not(windows))]
-fn spawn_opener(_program: &str, path: &str) -> Result<(), String> {
+pub(crate) fn spawn_opener(_program: &str, path: &str) -> Result<(), String> {
     std::process::Command::new("xdg-open")
         .arg(path)
         .spawn()
@@ -806,6 +809,27 @@ fn exit_app(app: AppHandle) {
     windows::exit_app(&app);
 }
 
+#[tauri::command]
+async fn check_update(app: AppHandle) -> Result<UpdateInfo, String> {
+    update::check(&app).await
+}
+
+/// Returns the cached result of the last check; never touches the network.
+#[tauri::command]
+fn last_update_result() -> Option<UpdateInfo> {
+    update::last_result()
+}
+
+#[tauri::command]
+async fn install_update(app: AppHandle) -> Result<(), String> {
+    update::install_latest(app).await
+}
+
+#[tauri::command]
+fn open_release_page(url: String) -> Result<(), String> {
+    update::open_release_page(&url)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -852,6 +876,22 @@ pub fn run() {
             if std::env::args().any(|arg| arg == "--show-panel") {
                 windows::open_panel(app.handle());
             }
+            // The app usually starts without any window, so the automatic update
+            // check has to live here instead of in the frontend.
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                if let Ok(Some(info)) = update::auto_check(&update_handle).await {
+                    triggers::notify(
+                        &update_handle,
+                        "发现新版本",
+                        &format!(
+                            "LiteScriptManager v{} 已发布，可在「设置 → 关于与更新」中安装",
+                            info.latest_version
+                        ),
+                    );
+                    let _ = update_handle.emit("update-check-result", &info);
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -891,6 +931,10 @@ pub fn run() {
             close_panel,
             show_main,
             exit_app,
+            check_update,
+            last_update_result,
+            install_update,
+            open_release_page,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

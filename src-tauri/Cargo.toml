@@ -1,6 +1,6 @@
 [package]
 name = "litescriptmanager"
-version = "0.1.0"
+version = "0.2.0"
 description = "LiteScriptManager"
 authors = ["LiteScriptManager"]
 edition = "2024"
@@ -31,10 +31,12 @@ chrono = "0.4"
 chrono-tz = "0.10"
 encoding_rs = "0.8"
 sha2 = "0.10"
+semver = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Dwm", "Wdk_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_Graphics_Dwm", "Wdk_System_Threading"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1,10 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { api, friendlyError } from "./api";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { api, formatBytes, friendlyError } from "./api";
   import { createListenerGroup } from "./listeners";
   import { pageAction } from "./uiActions";
   import type { PageAction } from "./uiActions";
-  import type { Settings } from "./types";
+  import Icon from "./Icon.svelte";
+  import type { Settings, UpdateInfo, UpdateProgress } from "./types";
 
   let {
     notify = () => {},
@@ -15,6 +17,19 @@
   let values: Settings = $state({});
   let loading = $state(true);
   let saving = $state(false);
+
+  let appVersion = $state("");
+  let updateInfo: UpdateInfo | null = $state(null);
+  let updateError = $state("");
+  let installError = $state("");
+  let checking = $state(false);
+  let installing = $state(false);
+  let progress: UpdateProgress | null = $state(null);
+
+  const percent = $derived.by(() => {
+    if (!progress || !progress.total) return null;
+    return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
+  });
 
   async function load() {
     try {
@@ -36,6 +51,52 @@
 
   function setValue(key: string, value: string) {
     values = { ...values, [key]: value };
+  }
+
+  async function checkUpdate() {
+    checking = true;
+    updateError = "";
+    installError = "";
+    try {
+      const info = await api.checkUpdate();
+      updateInfo = info;
+      if (!info.has_update) notify("已是最新版本");
+    } catch (error) {
+      updateInfo = null;
+      updateError = friendlyError(error);
+    } finally {
+      checking = false;
+    }
+  }
+
+  async function installUpdate() {
+    if (!updateInfo?.download_url || !updateInfo.asset_name) return;
+    installing = true;
+    installError = "";
+    progress = { downloaded: 0, total: updateInfo.asset_size };
+    try {
+      await api.installUpdate();
+    } catch (error) {
+      installing = false;
+      progress = null;
+      installError = friendlyError(error);
+      notify(installError, "error");
+    }
+  }
+
+  async function openReleasePage() {
+    if (!updateInfo?.release_url) return;
+    try {
+      await api.openReleasePage(updateInfo.release_url);
+    } catch (error) {
+      notify(friendlyError(error), "error");
+    }
+  }
+
+  function formatDate(value: string | null | undefined): string {
+    if (!value) return "";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("zh-CN");
   }
 
   async function save() {
@@ -64,8 +125,19 @@
 
   onMount(() => {
     load();
+    getVersion().then((value) => { appVersion = value; }).catch(() => {});
+    // Show the result of the startup check even though its event fired before this window existed.
+    api.lastUpdateResult().then((info) => {
+      if (info && !updateInfo) updateInfo = info;
+    }).catch(() => {});
     const listeners = createListenerGroup();
     listeners.add("settings-changed", load);
+    listeners.add<UpdateProgress>("update-progress", (event) => { progress = event.payload; });
+    listeners.add<UpdateInfo>("update-check-result", (event) => {
+      updateInfo = event.payload;
+      updateError = "";
+      installError = "";
+    });
     return () => listeners.dispose();
   });
 </script>
@@ -130,6 +202,59 @@
         </div>
         <div class="info-box">窗口关闭即销毁 WebView；托盘常驻时没有 WebView 内存。面板和主窗口不要同时长期打开。</div>
       </section>
+
+      <section class="settings-card">
+        <h3>关于与更新</h3>
+        <div class="about-row">
+          <div>
+            <div class="about-name">LiteScriptManager <span class="version-badge">v{appVersion || updateInfo?.current_version || "—"}</span></div>
+            <div class="muted tiny">更新来自 GitHub Releases（Jaspersol/LiteScriptManager）</div>
+          </div>
+          <button class="btn btn-sm" disabled={checking || installing} onclick={checkUpdate}>
+            <Icon name="refresh" size={14} /> {checking ? "检查中…" : "检查更新"}
+          </button>
+        </div>
+        <label class="setting-check">
+          <input type="checkbox" checked={bool("auto_check_update")} onchange={(event) => setBool("auto_check_update", event.currentTarget.checked)} /> 启动时自动检查更新（每 6 小时最多一次）
+        </label>
+
+        {#if installing}
+          <div class="update-box">
+            <div class="update-line"><span class="status-dot running"></span> 
+              {percent === null ? "正在下载更新包…" : percent >= 100 ? "下载完成，正在安装…" : `正在下载更新包 ${percent}%`}
+            </div>
+            <div class="progress"><div class="progress-bar" style:width={`${percent ?? 8}%`}></div></div>
+            <div class="muted tiny">安装程序启动后应用会自动退出，并在安装完成后重新打开。</div>
+          </div>
+        {:else if updateError}
+          <div class="update-box error">{updateError}</div>
+        {:else if updateInfo && updateInfo.has_update}
+          <div class="update-box">
+            <div class="update-line"><span class="status-dot running"></span> 发现新版本 v{updateInfo.latest_version}
+              {#if formatDate(updateInfo.published_at)}<span class="muted tiny">· {formatDate(updateInfo.published_at)}</span>{/if}
+            </div>
+            {#if updateInfo.notes}
+              <div class="release-notes">{updateInfo.notes}</div>
+            {/if}
+            <div class="update-actions">
+              <button class="btn btn-sm btn-primary" disabled={!updateInfo.download_url} onclick={installUpdate}>
+                <Icon name="download" size={14} /> 下载并安装
+              </button>
+              {#if updateInfo.release_url}
+                <button class="btn btn-sm btn-ghost" onclick={openReleasePage}>在 GitHub 查看</button>
+              {/if}
+              {#if updateInfo.asset_size}<span class="muted tiny">{formatBytes(updateInfo.asset_size)}</span>{/if}
+            </div>
+            {#if installError}
+              <div class="install-error">{installError}<br />下载失败时可直接从 GitHub Release 页面手动下载安装包。</div>
+            {/if}
+          </div>
+        {:else if updateInfo}
+          <div class="update-box">当前已是最新版本 v{updateInfo.current_version}</div>
+        {:else}
+          <div class="info-box">点击「检查更新」从 GitHub Releases 获取最新版本；下载完成后会以静默方式安装并重启应用。</div>
+        {/if}
+      </section>
     </div>
   {/if}
 </div>
@@ -143,4 +268,15 @@
   .info-box { border: 1px solid var(--line-soft); background: #f8f9fb; border-radius: 11px; padding: 11px 12px; color: #7f8793; font-size: 11px; line-height: 1.6; }
   .field { margin-bottom: 13px; }
   .textarea { min-height: 82px; font-size: 11.5px; }
+  .about-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+  .about-name { font-size: 13px; color: #3c434d; font-weight: 550; display: flex; align-items: center; gap: 7px; }
+  .version-badge { border: 1px solid var(--line-soft); background: #f8f9fb; border-radius: 999px; padding: 1px 8px; font-size: 11px; color: #6b7380; font-weight: 500; }
+  .update-box { border: 1px solid var(--line-soft); background: #f8f9fb; border-radius: 11px; padding: 11px 12px; font-size: 11.5px; color: #5d6572; line-height: 1.6; }
+  .update-box.error { border-color: #f2dddd; background: #fffafa; color: #a75757; }
+  .update-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; font-weight: 500; color: #3c434d; }
+  .release-notes { margin-top: 8px; max-height: 132px; overflow: auto; white-space: pre-wrap; word-break: break-word; border-top: 1px dashed var(--line-soft); padding-top: 8px; color: #6b7380; font-size: 11px; }
+  .update-actions { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .install-error { margin-top: 9px; border-top: 1px dashed #f2dddd; padding-top: 8px; color: #a75757; font-size: 11px; line-height: 1.6; }
+  .progress { height: 6px; border-radius: 999px; background: #e6eaf1; overflow: hidden; margin: 9px 0 7px; }
+  .progress-bar { height: 100%; background: var(--accent); border-radius: 999px; transition: width .2s ease; }
 </style>

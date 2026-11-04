@@ -13,6 +13,7 @@ import type {
   Trigger,
   TriggerEdit,
   TriggerEvent,
+  UpdateInfo,
 } from "./types";
 
 export const api = {
@@ -63,6 +64,10 @@ export const api = {
   listTriggerEvents: (limit = 100) => invoke<TriggerEvent[]>("list_trigger_events", { limit }),
   getSettings: () => invoke<Settings>("get_settings"),
   updateSettings: (values: Settings) => invoke<Settings>("update_settings", { values }),
+  checkUpdate: () => invoke<UpdateInfo>("check_update"),
+  lastUpdateResult: () => invoke<UpdateInfo | null>("last_update_result"),
+  installUpdate: () => invoke<void>("install_update"),
+  openReleasePage: (url: string) => invoke<void>("open_release_page", { url }),
 };
 
 export function friendlyError(error: unknown): string {

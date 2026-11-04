@@ -187,3 +187,24 @@ export interface RunRecord {
 }
 
 export type Settings = Record<string, string>;
+
+export interface UpdateInfo {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_name: string | null;
+  notes: string | null;
+  published_at: string | null;
+  release_url: string | null;
+  asset_name: string | null;
+  asset_size: number | null;
+  download_url: string | null;
+  mirror_url: string | null;
+  sha256: string | null;
+  checked_at: number;
+}
+
+export interface UpdateProgress {
+  downloaded: number;
+  total: number | null;
+}

@@ -75,6 +75,16 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
+### Publishing a Release
+
+In-app updates read the latest GitHub Release of `Jaspersol/LiteScriptManager` through the GitHub API:
+
+1. Bump the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` so all three match
+2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`
+3. The `Release` workflow builds the NSIS installer and uploads it to the release; the workflow fails if the tag does not match the app version
+
+Users are notified by **设置 → 关于与更新** (Settings → About & Updates) → **检查更新** (Check for updates). Uploading `<installer>.exe.sha256` next to the installer adds SHA256 verification (format: `<hex digest>  <file name>`).
+
 ## Quick Start
 
 1. **Launch**: The app starts in the system tray without opening a window.
@@ -138,6 +148,13 @@ When the main window or quick panel opens, the backend scans running processes f
 - **Run history**: filters by script, status, and trigger source; exit code, duration, PID, stop reason, peak memory, CPU time, log tail, and full-log opening
 - **Settings**: autostart, open the panel on start, close-to-exit, default stop timeout, log retention days, maximum log size, monitor interval, global hotkey, allowed script roots, hash verification, and language preference
 - First-run guide and system-tray quick panel
+
+### Updates
+
+- **Check**: reads the latest GitHub Release, compares it with the running version, and shows the release notes
+- **Install**: downloads the NSIS installer over HTTPS (only `github.com` / `githubusercontent.com` hosts are accepted), verifies it is a Windows executable (and the SHA256 digest when the release ships a `.sha256` file), then runs it silently with `/S /UPDATE /R`. The app closes, the installer replaces the files, and the app restarts itself
+- **Automatic checks**: once per 6 hours on startup, and can be turned off with 设置 → 关于与更新 (Settings → About & Updates)
+- After the app restarts, an installed update reports its own version, so no update is offered again for that release
 
 ## Data Location
 

@@ -2,6 +2,9 @@ use crate::db;
 use rusqlite::Connection;
 use std::collections::HashMap;
 
+/// Keys the UI may read and write. Internal bookkeeping keys such as
+/// `last_update_check_ms` are stored in the database but stay out of this list
+/// so that saving settings from the frontend cannot overwrite them.
 pub const DEFAULTS: &[(&str, &str)] = &[
     ("start_with_windows", "false"),
     ("open_panel_on_start", "false"),
@@ -14,6 +17,7 @@ pub const DEFAULTS: &[(&str, &str)] = &[
     ("hotkey_show_panel", ""),
     ("allowed_roots", ""),
     ("verify_script_hash", "false"),
+    ("auto_check_update", "true"),
     ("first_run_done", "false"),
 ];
 

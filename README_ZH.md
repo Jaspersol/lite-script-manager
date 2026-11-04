@@ -75,6 +75,16 @@ cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
+### 发布新版本
+
+应用内更新通过 GitHub API 读取 `Jaspersol/LiteScriptManager` 的最新 Release：
+
+1. 同时修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 中的版本号，保持三处一致
+2. 打标签并推送：`git tag v0.2.0 && git push origin v0.2.0`
+3. `Release` 工作流会自动构建 NSIS 安装包并上传到 Release；标签与应用版本不一致时工作流会直接失败
+
+用户在 **设置 → 关于与更新** 中点击「检查更新」即可升级。如果在安装包旁额外上传 `<安装包名>.exe.sha256`（格式为 `<哈希>  <文件名>`），下载后还会校验 SHA256。
+
 ## 快速开始
 
 1. **启动**：应用启动后只显示系统托盘图标，不打开窗口。
@@ -138,6 +148,13 @@ cargo test --manifest-path src-tauri/Cargo.toml
 - **运行历史**：按脚本、状态和触发来源筛选；查看退出码、耗时、PID、停止原因、峰值内存、CPU 时间、日志尾部，以及打开完整日志
 - **设置**：开机启动、启动时打开面板、关闭即退出、默认停止超时、日志保留天数、日志最大总大小、监控采样间隔、全局快捷键、允许的脚本根目录、哈希校验和语言偏好
 - 首次启动引导和系统托盘快捷面板
+
+### 检查更新
+
+- **检查**：读取 GitHub 最新 Release，与当前版本比较，并展示发布说明
+- **安装**：仅通过 HTTPS 从 `github.com` / `githubusercontent.com` 下载 NSIS 安装包，校验其为 Windows 可执行文件（若 Release 附带 `.sha256` 文件则额外校验摘要），然后以 `/S /UPDATE /R` 静默运行；应用退出，安装程序替换文件后自动重启应用
+- **自动检查**：启动时检查，最多每 6 小时一次，可在「设置 → 关于与更新」中关闭
+- 更新安装并重启后，应用以新版本号运行，同一版本不会重复提示
 
 ## 数据位置
 

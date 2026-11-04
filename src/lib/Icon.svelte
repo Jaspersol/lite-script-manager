@@ -21,6 +21,7 @@
       | "refresh"
       | "folder"
       | "file"
+      | "download"
       | "panel";
     size?: number;
     strokeWidth?: number;
@@ -92,6 +93,10 @@
     <path d="M6 3.5h7.5l4.5 4.5v12.5H6V3.5Z"></path>
     <path d="M13.5 3.5V8H18"></path>
     <path d="M9 12.5h6M9 16h4.5"></path>
+  {:else if name === "download"}
+    <path d="M12 4v10.5"></path>
+    <path d="m7.8 10.4 4.2 4.2 4.2-4.2"></path>
+    <path d="M5 18.5h14"></path>
   {:else if name === "panel"}
     <rect x="3.5" y="4.5" width="17" height="15" rx="3"></rect>
     <path d="M9.5 4.5v15"></path>

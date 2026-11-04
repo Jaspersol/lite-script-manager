@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{
-    AppHandle, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
 
 /// Timestamp of a panel dismissal caused by focus loss.
@@ -26,8 +26,9 @@ const PANEL_HEIGHT: f64 = 486.0;
 
 pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show LSM", true, None::<&str>)?;
+    let check_update = MenuItem::with_id(app, "check-update", "Check updates", true, None::<&str>)?;
     let exit = MenuItem::with_id(app, "exit", "Exit LSM", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &exit])?;
+    let menu = Menu::with_items(app, &[&show, &check_update, &exit])?;
 
     let mut builder = TrayIconBuilder::with_id("lsm-tray")
         .menu(&menu)
@@ -47,6 +48,9 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
             "show" => {
                 open_main(app);
             }
+            "check-update" => {
+                check_updates_in_background(app);
+            }
             "exit" => exit_app(app),
             _ => {}
         });
@@ -56,6 +60,37 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     }
     builder.build(app)?;
     Ok(())
+}
+
+/// Runs a release check from the tray menu and reports the result.
+fn check_updates_in_background(app: &AppHandle) {
+    let handle = app.clone();
+    tauri::async_runtime::spawn(async move {
+        match crate::update::check(&handle).await {
+            Ok(info) => {
+                let _ = handle.emit("update-check-result", &info);
+                if info.has_update {
+                    crate::triggers::notify(
+                        &handle,
+                        "发现新版本",
+                        &format!(
+                            "LiteScriptManager v{} 已发布，可在「设置 → 关于与更新」中安装",
+                            info.latest_version
+                        ),
+                    );
+                } else {
+                    crate::triggers::notify(
+                        &handle,
+                        "检查更新",
+                        &format!("当前已是最新版本 v{}", info.current_version),
+                    );
+                }
+            }
+            Err(error) => {
+                crate::triggers::notify(&handle, "检查更新失败", &error);
+            }
+        }
+    });
 }
 
 fn attach_close_behavior(window: &WebviewWindow) {
