@@ -10,6 +10,8 @@
   import SettingsPage from "./lib/SettingsPage.svelte";
   import Icon from "./lib/Icon.svelte";
   import { pageAction } from "./lib/uiActions";
+  import ConfirmDialog from "./lib/ConfirmDialog.svelte";
+  import { confirmDialog } from "./lib/confirm";
   import type { RunStateEvent, RuntimeInfo, RuntimeMeta, Script, ScriptEdit, Settings } from "./lib/types";
 
   type Tab = "scripts" | "schedules" | "triggers" | "history" | "runtimes" | "settings";
@@ -272,7 +274,13 @@
   }
 
   async function deleteScript(script: Script) {
-    if (!confirm(`从列表中移除「${script.name}」？\n默认不会删除磁盘上的脚本文件。`)) return;
+    const ok = await confirmDialog({
+      title: "移除脚本",
+      message: `从列表中移除「${script.name}」？\n默认不会删除磁盘上的脚本文件。`,
+      confirmLabel: "移除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deleteScript(script.id, false);
       await refreshScripts();
@@ -651,6 +659,8 @@
     </div>
   </div>
 {/if}
+
+<ConfirmDialog />
 
 {#if toast}
   <div class="toast" class:error={toast.kind === "error"}>{toast.message}</div>

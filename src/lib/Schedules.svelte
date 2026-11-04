@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "./confirm";
   import { onMount } from "svelte";
   import { api, formatTime, friendlyError } from "./api";
   import { scriptName, statusLabel } from "./format";
@@ -109,7 +110,13 @@
   }
 
   async function remove(schedule: Schedule) {
-    if (!confirm(`删除计划「${schedule.name}」？`)) return;
+    const ok = await confirmDialog({
+      title: "删除计划",
+      message: `删除计划「${schedule.name}」？`,
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deleteSchedule(schedule.id);
       await load();

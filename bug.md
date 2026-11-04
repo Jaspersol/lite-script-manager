@@ -155,3 +155,15 @@ Tauri 的同步命令在主线程（事件循环线程）执行。`WebviewWindow
 - 4.6：`hide_panel` 已删除，面板改为销毁重建，每次都会重新定位。
 
 验证：`cargo check` 无警告，`cargo test` 21 项通过。仍未做 GUI 点击验证。
+
+---
+
+## 5. 确认对话框失效，且样式与应用不一致（已修复）
+
+**位置**：`App.svelte`（移除脚本）、`lib/History.svelte`（清空历史）、`lib/Schedules.svelte`（删除计划）、`lib/Triggers.svelte`（删除触发器）都使用 `window.confirm()`。
+
+**原因**：Tauri 的 WebView 里原生 `confirm()` 不能可靠弹出，调用后直接返回 `false`，所以点击删除/清空没有任何反应；即使弹出，也是系统样式，与应用的弹窗不一致。
+
+**修复**：新增 `lib/confirm.ts`（`confirmDialog()` 返回 `Promise<boolean>`）和 `lib/ConfirmDialog.svelte`（复用 `.modal` / `.btn` / `.btn-danger` 样式，Esc 或点击遮罩取消，打开时聚焦确认按钮），在 `App.svelte` 挂载一次，四处调用改为 `await confirmDialog({...})`，破坏性操作使用危险按钮样式。
+
+**验证**：`vite build` 与 `svelte-check`（0 错误 0 警告）通过。未在运行的应用里点击确认弹窗。

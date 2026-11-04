@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "./confirm";
   import { onMount } from "svelte";
   import { api, formatTime, friendlyError } from "./api";
   import { createListenerGroup } from "./listeners";
@@ -250,7 +251,13 @@
   }
 
   async function remove(trigger: Trigger) {
-    if (!confirm(`删除触发器「${trigger.name}」？`)) return;
+    const ok = await confirmDialog({
+      title: "删除触发器",
+      message: `删除触发器「${trigger.name}」？`,
+      confirmLabel: "删除",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.deleteTrigger(trigger.id);
       await load();

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { confirmDialog } from "./confirm";
   import { onMount } from "svelte";
   import { api, formatBytes, formatDuration, formatTime, friendlyError } from "./api";
   import { formatLogLine, sourceLabel, statusLabel } from "./format";
@@ -70,7 +71,13 @@
   }
 
   async function clearHistory() {
-    if (!confirm("清空全部运行历史？日志文件仍会保留，可在设置中调整日志保留策略。")) return;
+    const ok = await confirmDialog({
+      title: "清空运行历史",
+      message: "清空全部运行历史？日志文件仍会保留，可在设置中调整日志保留策略。",
+      confirmLabel: "清空",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const count = await api.clearRuns(null);
       selected = null;
