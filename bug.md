@@ -167,3 +167,15 @@ Tauri 的同步命令在主线程（事件循环线程）执行。`WebviewWindow
 **修复**：新增 `lib/confirm.ts`（`confirmDialog()` 返回 `Promise<boolean>`）和 `lib/ConfirmDialog.svelte`（复用 `.modal` / `.btn` / `.btn-danger` 样式，Esc 或点击遮罩取消，打开时聚焦确认按钮），在 `App.svelte` 挂载一次，四处调用改为 `await confirmDialog({...})`，破坏性操作使用危险按钮样式。
 
 **验证**：`vite build` 与 `svelte-check`（0 错误 0 警告）通过。未在运行的应用里点击确认弹窗。
+
+---
+
+## 6. 检测运行时环境时黑色终端窗口闪过（已修复）
+
+**位置**:`runtime.rs` 的 `wsl_distros()`。
+
+**原因**:`wsl.exe -l -q` 是控制台程序,启动时没有设置 `CREATE_NO_WINDOW`,检测运行时会弹出一个黑窗。同文件的 `run_capture` 已设置该标志,只有这一处漏了。其余子进程(`runner.rs` 的脚本启动、`spawn_opener` 打开 GUI 程序)不受影响。
+
+**修复**:给该命令加 `.creation_flags(0x08000000)`。
+
+**验证**:`cargo check` 无警告,`cargo test` 21 项通过。未在运行的应用里观察是否还闪窗。

@@ -470,10 +470,12 @@ fn python_gui_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
 
 #[cfg(windows)]
 fn wsl_distros() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
     let Ok(output) = Command::new("wsl.exe")
         .args(["-l", "-q"])
         .stdin(Stdio::null())
         .stderr(Stdio::piped())
+        .creation_flags(0x08000000)
         .output()
     else {
         return Vec::new();
