@@ -22,7 +22,7 @@ pub const SPECS: &[RuntimeSpec] = &[
         id: "python",
         name: "Python",
         extensions: &["py", "pyw"],
-        executables: &["python.exe", "python3.exe", "python", "py.exe", "py"],
+        executables: &["python.exe", "pythonw.exe", "python3.exe", "python", "py.exe", "py"],
         version_args: &["-V"],
         version_regex: Some(r"Python (\d+\.\d+\.\d+)"),
         always_available: false,

@@ -592,7 +592,7 @@
         <div class="field"><label class="label" for="edit-args">参数（每行一个）</label><textarea id="edit-args" class="textarea small" bind:value={editArgsText}></textarea></div>
         <div class="field"><label class="label" for="edit-cwd">工作目录（可选）</label><input id="edit-cwd" class="input mono" bind:value={editScript.cwd} /></div>
         <div class="field"><label class="label" for="edit-interpreter">解释器路径（可选）</label><input id="edit-interpreter" class="input mono" placeholder="留空则使用自动检测结果" bind:value={editInterpreterPath} /></div>
-        <div class="field"><label class="label" for="edit-process-match">进程匹配（可选）</label><input id="edit-process-match" class="input mono" placeholder="例如：pi-web；留空则按脚本路径匹配" bind:value={editProcessMatch} /></div>
+        <div class="field"><label class="label" for="edit-process-match">进程匹配（可选）</label><input id="edit-process-match" class="input mono" placeholder="例如：pi-web；留空则按脚本路径匹配" bind:value={editProcessMatch} /><div class="muted tiny" style="margin-top:4px">VBS、批处理等启动器脚本会很快退出。重启应用后要识别它拉起的常驻进程，请填写该进程命令行里的特征字符串。</div></div>
         <div class="form-grid">
           <div class="field"><label class="label" for="edit-stop-timeout">停止超时（秒）</label><input id="edit-stop-timeout" class="input" type="number" min="1" max="60" bind:value={editScript.stop_timeout_sec} /></div>
           <div class="field"><label class="label" for="edit-max-runtime">最大运行秒数（可选）</label><input id="edit-max-runtime" class="input" type="number" min="0" placeholder="留空不限制" bind:value={editScript.timeout_sec} /></div>

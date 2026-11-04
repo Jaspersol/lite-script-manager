@@ -140,8 +140,10 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
         add_column_if_missing(&conn, "runs", column, definition)?;
     }
 
+    // Runs still open at startup died with the previous session (their Job
+    // Object closed with the process). That is an interruption, not a script failure.
     let _ = conn.execute(
-        "UPDATE runs SET status='failed', error='应用上次退出时运行状态未正常结束', ended_at=?1
+        "UPDATE runs SET status='stopped', stop_reason='app_exit', ended_at=?1
          WHERE status IN ('running','stopping','starting','queued')",
         params![now_ms()],
     );

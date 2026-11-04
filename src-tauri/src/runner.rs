@@ -479,11 +479,31 @@ fn executable_allowed(script: &Script, exe: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Clears the adopt-in-progress flag even if the scan unwinds.
+#[cfg(windows)]
+struct AdoptingReset<'a>(&'a AtomicBool);
+
+#[cfg(windows)]
+impl Drop for AdoptingReset<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 #[cfg(windows)]
 fn spawn_adopted_monitor(app: AppHandle, handle: RunHandle) {
+    // A bare PID check is fooled by PID reuse; the creation time pins identity.
+    let created: Vec<(u32, Option<i64>)> = handle
+        .pids
+        .iter()
+        .map(|pid| (*pid, process_create_time_ms(*pid)))
+        .collect();
     tauri::async_runtime::spawn(async move {
         while handle.guard.active_processes() > 0
-            || handle.pids.iter().any(|pid| process_alive(*pid))
+            || created.iter().any(|(pid, started)| {
+                process_alive(*pid)
+                    && (started.is_none() || process_create_time_ms(*pid) == *started)
+            })
         {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -662,6 +682,7 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
     if state.adopting.swap(true, Ordering::SeqCst) {
         return Ok(0);
     }
+    let reset = AdoptingReset(&state.adopting);
 
     let result = (|| -> Result<usize, String> {
         let scripts = {
@@ -684,7 +705,10 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                 .runs
                 .lock()
                 .map_err(|_| "运行状态锁失败".to_string())?;
-            let pids = runs.values().map(|run| run.pid).collect::<HashSet<_>>();
+            let pids = runs
+                .values()
+                .flat_map(|run| run.pids.iter().copied())
+                .collect::<HashSet<_>>();
             let scripts = runs
                 .values()
                 .map(|run| run.script_id.clone())
@@ -792,7 +816,7 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
         Ok(adopted)
     })();
 
-    state.adopting.store(false, Ordering::SeqCst);
+    drop(reset);
     result
 }
 
@@ -1367,6 +1391,7 @@ pub fn start_with(
     // Adopt an instance still running from a previous session instead of
     // spawning a duplicate or refusing with "already running".
     if active_count(app, &script.id) == 0
+        && script.max_instances <= 1
         && let Some(event) = attach_running(app, &script)
     {
         return Ok(event);

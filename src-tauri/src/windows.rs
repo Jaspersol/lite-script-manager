@@ -2,6 +2,7 @@ use crate::runner;
 use crate::settings;
 use crate::state::AppState;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -14,6 +15,9 @@ use tauri::{
 static PANEL_BLUR_AT: Mutex<Option<Instant>> = Mutex::new(None);
 const PANEL_REOPEN_GUARD: Duration = Duration::from_millis(300);
 const PANEL_WATCH_INTERVAL: Duration = Duration::from_millis(120);
+/// About five seconds of never gaining focus.
+const PANEL_FOCUS_GIVE_UP_TICKS: u32 = 40;
+static PANEL_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 const PANEL_LABEL: &str = "panel";
 const MAIN_LABEL: &str = "main";
@@ -41,7 +45,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
         })
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => {
-                let _ = ensure_main(app);
+                open_main(app);
             }
             "exit" => exit_app(app),
             _ => {}
@@ -100,7 +104,8 @@ pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .build()?;
 
     attach_close_behavior(&window);
-    start_dismiss_watchdog(app, &window);
+    let generation = PANEL_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
+    start_dismiss_watchdog(app, &window, generation);
     let position = panel_position(app, &window);
     let _ = window.set_position(position);
     let _ = window.show();
@@ -110,32 +115,44 @@ pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
 
 /// Dismisses the panel after it has held and then lost focus. The
 /// `Focused(false)` event alone is not enough: when Windows refuses the
-/// foreground request no later click ever produces a focus event, so the panel
-/// could not be closed. Polling also retries the blocked focus request.
-fn start_dismiss_watchdog(app: &AppHandle, window: &WebviewWindow) {
+/// foreground request no later click ever produces a focus event. Polling
+/// retries the blocked focus request and gives up after
+/// `PANEL_FOCUS_GIVE_UP_TICKS`. A watchdog exits once a newer panel
+/// generation exists, so a quick reopen does not leave a stale poller behind.
+fn start_dismiss_watchdog(app: &AppHandle, window: &WebviewWindow, generation: u64) {
     let app = app.clone();
     let window = window.clone();
     tauri::async_runtime::spawn(async move {
         let mut had_focus = false;
         let mut focus_attempts = 0u32;
+        let mut unfocused_ticks = 0u32;
         loop {
             tokio::time::sleep(PANEL_WATCH_INTERVAL).await;
-            if app.get_webview_window(PANEL_LABEL).is_none() {
+            if PANEL_GENERATION.load(Ordering::SeqCst) != generation
+                || app.get_webview_window(PANEL_LABEL).is_none()
+            {
                 return;
             }
             if !window.is_visible().unwrap_or(false) {
                 had_focus = false;
                 focus_attempts = 0;
+                unfocused_ticks = 0;
                 continue;
             }
             if window.is_focused().unwrap_or(false) {
                 had_focus = true;
+                unfocused_ticks = 0;
                 continue;
             }
             if had_focus {
                 if let Ok(mut at) = PANEL_BLUR_AT.lock() {
                     *at = Some(Instant::now());
                 }
+                let _ = window.destroy();
+                return;
+            }
+            unfocused_ticks += 1;
+            if unfocused_ticks >= PANEL_FOCUS_GIVE_UP_TICKS {
                 let _ = window.destroy();
                 return;
             }
@@ -152,7 +169,7 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
-        hide_panel(app);
+        close_panel(app);
         return Ok(window);
     }
 
@@ -168,7 +185,7 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     attach_close_behavior(&window);
     let _ = window.show();
     let _ = window.set_focus();
-    hide_panel(app);
+    close_panel(app);
     Ok(window)
 }
 
@@ -210,6 +227,26 @@ fn apply_light_caption(window: &WebviewWindow) {
 #[cfg(not(windows))]
 fn apply_light_caption(_window: &WebviewWindow) {}
 
+/// Window creation blocks on WebView2 and deadlocks on Windows when called
+/// from the event-loop thread (tray/shortcut/single-instance handlers), so
+/// every runtime entry point goes through a worker thread.
+fn run_off_main(app: &AppHandle, task: impl FnOnce(&AppHandle) + Send + 'static) {
+    let app = app.clone();
+    std::thread::spawn(move || task(&app));
+}
+
+pub fn open_main(app: &AppHandle) {
+    run_off_main(app, |app| {
+        let _ = ensure_main(app);
+    });
+}
+
+pub fn open_panel(app: &AppHandle) {
+    run_off_main(app, |app| {
+        let _ = ensure_panel(app);
+    });
+}
+
 pub fn toggle_panel(app: &AppHandle) {
     let recently_dismissed = PANEL_BLUR_AT
         .lock()
@@ -222,27 +259,18 @@ pub fn toggle_panel(app: &AppHandle) {
         }
         return;
     }
-    if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
-        if panel.is_visible().unwrap_or(false) {
+    run_off_main(app, |app| {
+        if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
             let _ = panel.destroy();
         } else {
-            let _ = panel.show();
-            let _ = panel.set_focus();
+            let _ = ensure_panel(app);
         }
-    } else {
-        let _ = ensure_panel(app);
-    }
+    });
 }
 
 pub fn close_panel(app: &AppHandle) {
     if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
         let _ = panel.destroy();
-    }
-}
-
-fn hide_panel(app: &AppHandle) {
-    if let Some(panel) = app.get_webview_window(PANEL_LABEL) {
-        let _ = panel.hide();
     }
 }
 

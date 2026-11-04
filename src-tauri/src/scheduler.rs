@@ -69,6 +69,12 @@ fn ensure_next(app: &AppHandle, schedule: &mut Schedule) -> Result<(), String> {
     if schedule.next_run_at.is_some() {
         return Ok(());
     }
+    // A loop re-arms from the lifecycle event of its own run. Seeding it here
+    // while an instance is alive fires an immediate duplicate start every
+    // scheduler pass, which the skip policy rejects and logs.
+    if schedule.kind == "loop" && runner::active_count(app, &schedule.script_id) > 0 {
+        return Ok(());
+    }
     let now = db::now_ms();
     let next = initial_next(
         &schedule.kind,

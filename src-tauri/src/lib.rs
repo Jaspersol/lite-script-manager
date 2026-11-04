@@ -115,8 +115,28 @@ fn read_log_tail(path: &str, max_lines: usize) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn list_scripts(state: State<AppState>) -> Result<Vec<Script>, String> {
-    let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-    db::list_scripts(&conn)
+    let mut scripts = {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::list_scripts(&conn)?
+    };
+    // The stored status is the latest run row; a run that never got finalized
+    // would otherwise stay "running". Live handles are the source of truth.
+    let live: std::collections::HashSet<String> = state
+        .runs
+        .lock()
+        .map(|runs| runs.values().map(|run| run.script_id.clone()).collect())
+        .unwrap_or_default();
+    for script in &mut scripts {
+        let marked_active = matches!(script.status.as_str(), "running" | "starting" | "stopping");
+        if live.contains(&script.id) {
+            if !marked_active {
+                script.status = "running".into();
+            }
+        } else if marked_active {
+            script.status = "stopped".into();
+        }
+    }
+    Ok(scripts)
 }
 
 #[tauri::command]
@@ -725,7 +745,6 @@ fn get_settings(state: State<AppState>) -> Result<HashMap<String, String>, Strin
     settings::all(&conn)
 }
 
-#[tauri::command]
 fn apply_hotkey(app: &AppHandle) -> Result<(), String> {
     let hotkey = {
         let state = app.state::<AppState>();
@@ -757,22 +776,26 @@ fn update_settings(
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         settings::get_bool(&conn, "start_with_windows", false)
     };
-    autostart::apply(autostart_enabled)?;
-    apply_hotkey(&app)?;
+    let autostart_result = autostart::apply(autostart_enabled);
+    let hotkey_result = apply_hotkey(&app);
     scheduler::wake(&app);
     triggers::wake(&app);
     let _ = app.emit("settings-changed", ());
+    autostart_result?;
+    hotkey_result?;
     let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
     settings::all(&conn)
 }
 
 #[tauri::command]
-fn close_panel(app: AppHandle) {
+async fn close_panel(app: AppHandle) {
     windows::close_panel(&app);
 }
 
+/// Must be `async`: a synchronous command runs on the event-loop thread, where
+/// creating a window deadlocks on Windows.
 #[tauri::command]
-fn show_main(app: AppHandle) -> Result<(), String> {
+async fn show_main(app: AppHandle) -> Result<(), String> {
     windows::ensure_main(&app)
         .map(|_| ())
         .map_err(|e| format!("打开主窗口失败: {e}"))
@@ -788,9 +811,9 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if args.iter().any(|arg| arg == "--show-panel") {
-                let _ = windows::ensure_panel(app);
+                windows::open_panel(app);
             } else {
-                let _ = windows::ensure_main(app);
+                windows::open_main(app);
             }
         }))
         .plugin(tauri_plugin_dialog::init())
@@ -799,7 +822,7 @@ pub fn run() {
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
                     if event.state == ShortcutState::Pressed {
-                        let _ = windows::ensure_panel(app);
+                        windows::open_panel(app);
                     }
                 })
                 .build(),
@@ -827,7 +850,7 @@ pub fn run() {
                 let _ = windows::ensure_main(app.handle());
             }
             if std::env::args().any(|arg| arg == "--show-panel") {
-                let _ = windows::ensure_panel(app.handle());
+                windows::open_panel(app.handle());
             }
             Ok(())
         })
