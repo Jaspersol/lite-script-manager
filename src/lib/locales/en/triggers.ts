@@ -56,6 +56,11 @@ export const triggers: Record<string, string> = {
   "触发时机：进程启动/退出、CPU/内存等资源阈值，或脚本自身的运行生命周期事件。":
     "When to fire: a process starting or exiting, a resource threshold such as CPU or memory, or a script lifecycle event.",
   "进程匹配": "Process match",
+  "脚本匹配": "Script match",
+  "监听脚本": "Watched script",
+  "留空则匹配所有受管脚本。由本触发器自身启动的运行不会再次触发它。":
+    "Leave empty to match every managed script. Runs started by this trigger itself never re-fire it.",
+  "任意脚本": "Any script",
   "只配置进程名时不需要查询命令行；路径/命令行匹配会增加一次进程查询。":
     "Matching by process name only does not need a command-line lookup. Matching by path or command line adds one extra process query.",
   "进程名": "Process name",

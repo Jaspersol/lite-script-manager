@@ -155,6 +155,29 @@ pub fn find_spec(id: &str) -> Option<&'static RuntimeSpec> {
     SPECS.iter().find(|s| s.id.eq_ignore_ascii_case(id))
 }
 
+/// 仅用于接管外部启动进程的额外解释器文件名。
+/// 不参与 `candidates_for` 检测，因此不会出现在解释器候选里
+/// （例如 wscript.exe 是 GUI 宿主，没有控制台输出，不能作为运行用解释器）。
+pub fn adopt_executables(spec: &RuntimeSpec) -> &'static [&'static str] {
+    match spec.id {
+        "python" => &["pyw.exe"],
+        "shell" => &["sh.exe"],
+        "perl" => &["wperl.exe"],
+        "php" => &["php-win.exe", "php-cgi.exe"],
+        "r" => &["R.exe"],
+        "lua" => &["lua51.exe", "lua52.exe", "lua55.exe"],
+        "powershell" => &["powershell_ise.exe"],
+        "vbscript" | "jscript" | "wsf" => &["wscript.exe"],
+        "autohotkey" => &[
+            "AutoHotkeyU64.exe",
+            "AutoHotkeyU32.exe",
+            "AutoHotkeyA32.exe",
+            "AutoHotkeyUX.exe",
+        ],
+        _ => &[],
+    }
+}
+
 pub fn spec_for_extension(extension: &str) -> Option<&'static RuntimeSpec> {
     let ext = extension.trim_start_matches('.').to_ascii_lowercase();
     SPECS
@@ -1028,5 +1051,20 @@ mod tests {
         assert_eq!(spec_for_extension("py").map(|spec| spec.id), Some("python"));
         assert!(find_spec("missing").is_none());
         assert!(spec_for_extension("missing").is_none());
+    }
+
+    #[test]
+    fn detection_patterns_are_adoptable() {
+        for spec in SPECS {
+            for pattern in common_patterns(spec) {
+                let file = pattern.rsplit('\\').next().unwrap();
+                let known = spec
+                    .executables
+                    .iter()
+                    .chain(adopt_executables(spec))
+                    .any(|name| name.eq_ignore_ascii_case(file));
+                assert!(known, "{} 的检测路径 {} 不在接管白名单里", spec.id, pattern);
+            }
+        }
     }
 }

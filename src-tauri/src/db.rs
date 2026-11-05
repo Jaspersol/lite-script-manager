@@ -668,6 +668,31 @@ pub fn mark_schedule_result(
     Ok(())
 }
 
+/// Points a schedule that stored a `queued-*` placeholder at the real run.
+pub fn rebind_schedule_run(conn: &Connection, queued_id: &str, run_id: &str) -> Result<(), String> {
+    conn.execute(
+        "UPDATE schedules SET last_run_id=?2, last_status='running', last_error=NULL, updated_at=?3
+         WHERE last_run_id=?1",
+        params![queued_id, run_id, now_ms()],
+    )
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
+    Ok(())
+}
+
+pub fn mark_schedule_result_by_run(
+    conn: &Connection,
+    run_id: &str,
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE schedules SET last_status=?2, last_error=?3, updated_at=?4 WHERE last_run_id=?1",
+        params![run_id, status, error, now_ms()],
+    )
+    .map_err(|e| format!("数据库操作失败: {e}"))?;
+    Ok(())
+}
+
 pub fn delete_schedule(conn: &Connection, id: &str) -> Result<(), String> {
     conn.execute("DELETE FROM schedules WHERE id=?1", params![id])
         .map_err(|e| format!("数据库操作失败: {e}"))?;

@@ -4,7 +4,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { api, friendlyError } from "./lib/api";
   import { i18n, t } from "./lib/i18n.svelte";
-  import { isActiveStatus, isBusyStatus, scriptName, statusLabel } from "./lib/format";
+  import { applyRunState, isActiveStatus, isBusyStatus, scriptName, statusLabel } from "./lib/format";
   import { createListenerGroup } from "./lib/listeners";
   import Schedules from "./lib/Schedules.svelte";
   import Triggers from "./lib/Triggers.svelte";
@@ -352,9 +352,7 @@
     const listeners = createListenerGroup();
     listeners.add<RunStateEvent>("run-state", (event) => {
       const payload = event.payload;
-      scripts = scripts.map((script) => script.id === payload.script_id
-        ? { ...script, status: payload.status, last_error: payload.error, last_run_id: payload.run_id }
-        : script);
+      scripts = scripts.map((script) => script.id === payload.script_id ? applyRunState(script, payload) : script);
       if (payload.status === "failed" && payload.error) {
         showToast(joinMessage(scriptName(scripts, payload.script_id), payload.error), "error");
       }

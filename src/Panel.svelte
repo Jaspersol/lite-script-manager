@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api, friendlyError } from "./lib/api";
-  import { isActiveStatus, isBusyStatus } from "./lib/format";
+  import { applyRunState, isActiveStatus, isBusyStatus } from "./lib/format";
   import { createListenerGroup } from "./lib/listeners";
   import Icon from "./lib/Icon.svelte";
   import type { RunStateEvent, RuntimeMeta, Script } from "./lib/types";
@@ -82,9 +82,7 @@
     const listeners = createListenerGroup();
     listeners.add<RunStateEvent>("run-state", (event) => {
       const payload = event.payload;
-      scripts = scripts.map((script) => script.id === payload.script_id
-        ? { ...script, status: payload.status, last_error: payload.error, last_run_id: payload.run_id }
-        : script);
+      scripts = scripts.map((script) => script.id === payload.script_id ? applyRunState(script, payload) : script);
     });
     listeners.add("scripts-changed", refresh);
     const onKey = (event: KeyboardEvent) => {

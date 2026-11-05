@@ -1,5 +1,5 @@
 import { t } from "./i18n.svelte";
-import type { Script } from "./types";
+import type { RunStateEvent, Script } from "./types";
 
 const STATUS_LABELS: Record<string, string> = {
   stopped: "已停止",
@@ -39,6 +39,20 @@ export function isBusyStatus(status: string): boolean {
 
 export function isActiveStatus(status: string): boolean {
   return status === "running" || status === "starting" || status === "queued";
+}
+
+/**
+ * Applies a run-state event to a script. A `queued-*` placeholder must not
+ * overwrite the state of a live instance, or the stop button stays disabled.
+ */
+export function applyRunState(script: Script, payload: RunStateEvent): Script {
+  if (
+    payload.run_id.startsWith("queued-") &&
+    (script.status === "running" || script.status === "starting" || script.status === "stopping")
+  ) {
+    return script;
+  }
+  return { ...script, status: payload.status, last_error: payload.error, last_run_id: payload.run_id };
 }
 
 export function scriptName(scripts: Script[], id: string): string {

@@ -38,6 +38,8 @@ struct TriggerConfig {
     #[serde(default)]
     command: String,
     #[serde(default)]
+    script_id: String,
+    #[serde(default)]
     metric: String,
     #[serde(default)]
     op: String,
@@ -77,7 +79,6 @@ struct ProcessMeta {
 #[derive(Debug, Clone, Copy, Default)]
 struct ConditionState {
     since: i64,
-    active: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -87,10 +88,98 @@ struct CpuHistory {
     percent: f64,
 }
 
+/// Per-condition sampling state is keyed by `(trigger id, condition index)`;
+/// `active` is the edge state of the trigger as a whole.
+#[derive(Default)]
+struct ResourceStates {
+    conditions: HashMap<(String, usize), ConditionState>,
+    cpu: HashMap<(String, usize), CpuHistory>,
+    active: HashMap<String, bool>,
+}
+
+impl ResourceStates {
+    /// Drops state of triggers that were deleted or whose definition changed.
+    fn retain_unchanged(
+        &mut self,
+        old: &HashMap<String, String>,
+        new: &HashMap<String, String>,
+    ) {
+        let keep = |id: &String| new.get(id).is_some() && new.get(id) == old.get(id);
+        self.conditions.retain(|(id, _), _| keep(id));
+        self.cpu.retain(|(id, _), _| keep(id));
+        self.active.retain(|id, _| keep(id));
+    }
+}
+
+fn trigger_signatures(triggers: &[Trigger]) -> HashMap<String, String> {
+    triggers
+        .iter()
+        .map(|trigger| {
+            (
+                trigger.id.clone(),
+                format!("{}\n{}", trigger.event_type, trigger.config_json),
+            )
+        })
+        .collect()
+}
+
+/// Edge detector for `resource_enter`. Returns true when the trigger must fire.
+/// It re-arms only once every condition has left its hysteresis band.
+fn resource_enter_step(active: &mut bool, all_true: bool, armed: bool, all_exit: bool) -> bool {
+    if all_true && armed && !*active {
+        *active = true;
+        true
+    } else {
+        if *active && all_exit {
+            *active = false;
+        }
+        false
+    }
+}
+
+/// Edge detector for `resource_exit`. Returns true when the trigger must fire.
+fn resource_exit_step(active: &mut bool, all_true: bool, armed: bool, all_exit: bool) -> bool {
+    if all_true && armed && !*active {
+        *active = true;
+    }
+    if *active && all_exit {
+        *active = false;
+        return true;
+    }
+    false
+}
+
+/// PIDs in `subject` that are absent from `other`, or present with a different
+/// creation time (the PID was reused). An unreadable creation time (0) matches.
+fn changed_processes(
+    subject: &HashMap<u32, ProcessMeta>,
+    other: &HashMap<u32, ProcessMeta>,
+) -> Vec<u32> {
+    subject
+        .iter()
+        .filter(|(pid, meta)| {
+            other.get(pid).is_none_or(|old| {
+                old.created_ms != 0 && meta.created_ms != 0 && old.created_ms != meta.created_ms
+            })
+        })
+        .map(|(pid, _)| *pid)
+        .collect()
+}
+
+/// Whether a lifecycle event may fire a script start/exit trigger.
+fn script_event_matches(config: &TriggerConfig, trigger_id: &str, event: &LifecycleEvent) -> bool {
+    // A trigger's own action must not re-fire it, or `run_script` loops forever.
+    if event.source == "trigger" && event.source_id.as_deref() == Some(trigger_id) {
+        return false;
+    }
+    config.script_id.trim().is_empty() || config.script_id == event.script_id
+}
+
 pub fn wake(app: &AppHandle) {
     let state = app.state::<AppState>();
     state.trigger_generation.fetch_add(1, Ordering::Relaxed);
-    state.trigger_wake.notify_waiters();
+    // `notify_one` keeps a permit if the loop is busy, so the wake-up is not lost.
+    state.trigger_wake.notify_one();
 }
 
 fn parse_config(trigger: &Trigger) -> TriggerConfig {
@@ -126,11 +215,24 @@ fn enrich(meta: &mut ProcessMeta) {
     }
 }
 
+/// Lowercased process name with a trailing `.exe` removed, so `explorer` matches `explorer.exe`.
+fn process_name_key(value: &str) -> String {
+    let value = lower(value);
+    value
+        .strip_suffix(".exe")
+        .map(str::to_string)
+        .unwrap_or(value)
+}
+
 fn identity_matches(config: &TriggerConfig, meta: &ProcessMeta, parent_name: &str) -> bool {
-    if !config.name.trim().is_empty() && lower(&config.name) != lower(&meta.name) {
+    if !config.name.trim().is_empty()
+        && process_name_key(&config.name) != process_name_key(&meta.name)
+    {
         return false;
     }
-    if !config.parent.trim().is_empty() && lower(&config.parent) != lower(parent_name) {
+    if !config.parent.trim().is_empty()
+        && process_name_key(&config.parent) != process_name_key(parent_name)
+    {
         return false;
     }
     true
@@ -334,9 +436,12 @@ pub fn fire_manual(app: &AppHandle, trigger_id: &str) -> Result<String, String> 
 
 fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<String, String> {
     let state = app.state::<AppState>();
-    if let Ok(conn) = state.db.lock()
-        && let Ok(Some(current)) = db::get_trigger(&conn, &trigger.id)
     {
+        let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        // A trigger deleted while its event was in flight must not act.
+        let Some(current) = db::get_trigger(&conn, &trigger.id)? else {
+            return Ok("deleted".into());
+        };
         if !current.enabled && event != "manual" {
             return Ok("disabled".into());
         }
@@ -355,7 +460,8 @@ fn fire_trigger(app: &AppHandle, trigger: &Trigger, event: &str) -> Result<Strin
     for action in actions {
         let result = match action.kind.as_str() {
             "run_script" => run_action_script(app, &action, trigger, false),
-            "stop_script" => runner::stop(app, &action.script_id).map(|_| "stopped".to_string()),
+            "stop_script" => runner::stop_with_reason(app, &action.script_id, "trigger")
+                .map(|_| "stopped".to_string()),
             "restart_script" => run_action_script(app, &action, trigger, true),
             "enable_trigger" | "disable_trigger" => {
                 let enabled = action.kind == "enable_trigger";
@@ -449,13 +555,13 @@ fn run_action_script(
         source_id: Some(trigger.id.clone()),
         timeout_sec: script.timeout_sec,
         success_codes: script.success_codes.clone(),
-        overlap_policy: if restart {
-            "replace".into()
-        } else {
-            "skip".into()
-        },
+        overlap_policy: "skip".into(),
     };
-    let event = runner::start_with(app, script, options)?;
+    let event = if restart {
+        runner::restart_with(app, script, options)?
+    } else {
+        runner::start_with(app, script, options)?
+    };
     Ok(if restart {
         format!("restarted {}", event.run_id)
     } else {
@@ -463,32 +569,32 @@ fn run_action_script(
     })
 }
 
-fn fire_process_matches(
+/// Runs the trigger actions on the blocking pool: they sleep, snapshot
+/// processes and hit SQLite, which must not occupy an async worker thread.
+async fn fire_blocking(app: &AppHandle, trigger: &Trigger, event: String) -> Result<String, String> {
+    let app = app.clone();
+    let trigger = trigger.clone();
+    match tauri::async_runtime::spawn_blocking(move || fire_trigger(&app, &trigger, &event)).await {
+        Ok(result) => result,
+        Err(error) => Err(format!("触发器任务失败: {error}")),
+    }
+}
+
+async fn fire_process_matches(
     app: &AppHandle,
     triggers: &[Trigger],
     event_type: &str,
-    current: &mut HashMap<u32, ProcessMeta>,
+    current: &HashMap<u32, ProcessMeta>,
     previous: &HashMap<u32, ProcessMeta>,
 ) {
-    let ids = if event_type == "process_started" {
-        current
-            .keys()
-            .filter(|pid| !previous.contains_key(pid))
-            .copied()
-            .collect::<Vec<_>>()
+    let started = event_type == "process_started";
+    let (subject, other) = if started {
+        (current, previous)
     } else {
-        previous
-            .keys()
-            .filter(|pid| !current.contains_key(pid))
-            .copied()
-            .collect::<Vec<_>>()
+        (previous, current)
     };
-    for pid in ids {
-        let Some(meta) = (if event_type == "process_started" {
-            current.get(&pid)
-        } else {
-            previous.get(&pid)
-        }) else {
+    for pid in changed_processes(subject, other) {
+        let Some(meta) = subject.get(&pid) else {
             continue;
         };
         let meta = meta.clone();
@@ -505,7 +611,8 @@ fn fire_process_matches(
             let config = parse_config(trigger);
             if process_matches(&config, &meta, &parent)
                 && let Err(error) =
-                    fire_trigger(app, trigger, &format!("{event_type}:{}:{}", meta.name, pid))
+                    fire_blocking(app, trigger, format!("{event_type}:{}:{}", meta.name, pid))
+                        .await
             {
                 logging::app_log("ERROR", &format!("触发器执行失败: {error}"));
             }
@@ -513,19 +620,22 @@ fn fire_process_matches(
     }
 }
 
-fn fire_script_event(app: &AppHandle, triggers: &[Trigger], event: &LifecycleEvent) {
+async fn fire_script_event(app: &AppHandle, triggers: &[Trigger], event: &LifecycleEvent) {
     let event_type = if matches!(event.status.as_str(), "running" | "starting") {
         "script_started"
     } else {
         "script_exited"
     };
     for trigger in triggers {
-        if trigger.event_type == event_type {
-            let _ = fire_trigger(
+        if trigger.event_type == event_type
+            && script_event_matches(&parse_config(trigger), &trigger.id, event)
+        {
+            let _ = fire_blocking(
                 app,
                 trigger,
-                &format!("{event_type}:{}:{}", event.script_id, event.status),
-            );
+                format!("{event_type}:{}:{}", event.script_id, event.status),
+            )
+            .await;
         }
     }
 }
@@ -552,8 +662,8 @@ fn monitor_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         let mut previous: Option<HashMap<u32, ProcessMeta>> = None;
-        let mut conditions: HashMap<String, ConditionState> = HashMap::new();
-        let mut cpu: HashMap<String, CpuHistory> = HashMap::new();
+        let mut states = ResourceStates::default();
+        let mut signatures: HashMap<String, String> = HashMap::new();
         let mut sampler = CpuSampler::default();
         let mut lifecycle = state.lifecycle_tx.subscribe();
         let mut triggers: Vec<Trigger> = Vec::new();
@@ -565,6 +675,9 @@ fn monitor_loop(app: AppHandle) {
             if generation != loaded_generation {
                 loaded_generation = generation;
                 triggers = load_triggers(&app);
+                let next = trigger_signatures(&triggers);
+                states.retain_unchanged(&signatures, &next);
+                signatures = next;
                 interval_ms = {
                     let conn = state.db.lock().ok();
                     conn.map(|conn| settings::get_i64(&conn, "monitor_interval_ms", 1000))
@@ -588,7 +701,7 @@ fn monitor_loop(app: AppHandle) {
                 _ = state.trigger_wake.notified() => {}
                 event = lifecycle.recv() => {
                     if let Ok(event) = event {
-                        fire_script_event(&app, &triggers, &event);
+                        fire_script_event(&app, &triggers, &event).await;
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
@@ -599,11 +712,14 @@ fn monitor_loop(app: AppHandle) {
                 let raw = runner::snapshot_processes();
                 let mut current = HashMap::with_capacity(raw.len());
                 for (pid, parent, name) in raw {
-                    let created_ms = previous
+                    // Read every tick: a reused PID is told apart by its creation time.
+                    let created_ms = runner::process_create_time_ms(pid).unwrap_or(0);
+                    // Backfill cached command lines first so only missing ones are read.
+                    let path = previous
                         .as_ref()
                         .and_then(|values| values.get(&pid))
-                        .map(|value| value.created_ms)
-                        .unwrap_or(0);
+                        .filter(|old| old.created_ms == created_ms)
+                        .and_then(|old| old.path.clone());
                     current.insert(
                         pid,
                         ProcessMeta {
@@ -611,33 +727,16 @@ fn monitor_loop(app: AppHandle) {
                             name,
                             parent,
                             created_ms,
-                            path: None,
+                            path,
                         },
                     );
                 }
-                for (pid, meta) in &mut current {
-                    if meta.created_ms == 0 {
-                        meta.created_ms = runner::process_create_time_ms(*pid).unwrap_or(0);
-                    }
-                }
                 enrich_process_triggers(&triggers, &mut current);
                 if let Some(previous) = previous.as_ref() {
-                    fire_process_matches(
-                        &app,
-                        &triggers,
-                        "process_started",
-                        &mut current,
-                        previous,
-                    );
-                    fire_process_matches(&app, &triggers, "process_exited", &mut current, previous);
-                    // Reuse cached paths without overwriting paths read this tick.
-                    for (pid, meta) in &mut current {
-                        if meta.path.is_none()
-                            && let Some(old) = previous.get(pid)
-                        {
-                            meta.path = old.path.clone();
-                        }
-                    }
+                    fire_process_matches(&app, &triggers, "process_started", &current, previous)
+                        .await;
+                    fire_process_matches(&app, &triggers, "process_exited", &current, previous)
+                        .await;
                 }
                 snapshot = Some(current);
             }
@@ -668,13 +767,14 @@ fn monitor_loop(app: AppHandle) {
                 let mut all_true = true;
                 let mut all_exit = true;
                 let mut armed = true;
-                for condition in &values {
+                for (index, condition) in values.iter().enumerate() {
+                    let key = (trigger.id.clone(), index);
                     let Some(value) = resource_value(
                         condition,
                         &config,
                         &system,
                         processes,
-                        cpu.entry(trigger.id.clone()).or_default(),
+                        states.cpu.entry(key.clone()).or_default(),
                     ) else {
                         all_true = false;
                         all_exit = true;
@@ -684,46 +784,31 @@ fn monitor_loop(app: AppHandle) {
                     let exited = condition_exit(value, condition);
                     all_true &= true_now;
                     all_exit &= exited;
-                    let entry = conditions.entry(trigger.id.clone()).or_default();
-                    if entry.since == 0 && true_now {
-                        entry.since = now;
-                    }
+                    let entry = states.conditions.entry(key).or_default();
                     if !true_now {
                         entry.since = 0;
+                    } else if entry.since == 0 {
+                        entry.since = now;
                     }
                     if entry.since > 0 && now - entry.since < condition.for_sec * 1000 {
                         armed = false;
                     }
                 }
-                let entry = conditions.entry(trigger.id.clone()).or_default();
+                let label = values
+                    .iter()
+                    .map(|condition| condition.metric.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+");
+                let active = states.active.entry(trigger.id.clone()).or_default();
                 if trigger.event_type == "resource_enter" {
-                    if all_true && armed && !entry.active {
-                        entry.active = true;
-                        let result = fire_trigger(
-                            &app,
-                            trigger,
-                            &format!("resource_enter:{}", config.metric),
-                        );
-                        if let Err(error) = result {
-                            logging::app_log("ERROR", &format!("资源触发器失败: {error}"));
-                        }
-                    } else if !all_true && !all_exit {
-                        entry.active = false;
-                        entry.since = 0;
+                    if resource_enter_step(active, all_true, armed, all_exit)
+                        && let Err(error) =
+                            fire_blocking(&app, trigger, format!("resource_enter:{label}")).await
+                    {
+                        logging::app_log("ERROR", &format!("资源触发器失败: {error}"));
                     }
-                } else {
-                    if all_true && armed && !entry.active {
-                        entry.active = true;
-                    }
-                    if entry.active && all_exit {
-                        entry.active = false;
-                        entry.since = 0;
-                        let _ = fire_trigger(
-                            &app,
-                            trigger,
-                            &format!("resource_exit:{}", config.metric),
-                        );
-                    }
+                } else if resource_exit_step(active, all_true, armed, all_exit) {
+                    let _ = fire_blocking(&app, trigger, format!("resource_exit:{label}")).await;
                 }
             }
             previous = snapshot;
@@ -781,5 +866,109 @@ mod tests {
             &meta(None),
             "explorer.exe"
         ));
+    }
+
+    fn process(pid: u32, created_ms: i64) -> (u32, ProcessMeta) {
+        (
+            pid,
+            ProcessMeta {
+                pid,
+                name: "x.exe".into(),
+                parent: 0,
+                created_ms,
+                path: None,
+            },
+        )
+    }
+
+    #[test]
+    fn resource_enter_fires_again_after_metric_falls_away() {
+        // threshold 80, hysteresis 5: 90, 30, 90, 30, 90
+        let mut active = false;
+        let mut fired = 0;
+        for (all_true, all_exit) in [(true, false), (false, true), (true, false), (false, true), (true, false)] {
+            if resource_enter_step(&mut active, all_true, true, all_exit) {
+                fired += 1;
+            }
+        }
+        assert_eq!(fired, 3);
+    }
+
+    #[test]
+    fn resource_enter_stays_latched_inside_hysteresis_band() {
+        // 90, then 77 (below threshold, above exit bound), then 90 again.
+        let mut active = false;
+        assert!(resource_enter_step(&mut active, true, true, false));
+        assert!(!resource_enter_step(&mut active, false, true, false));
+        assert!(!resource_enter_step(&mut active, true, true, false));
+    }
+
+    #[test]
+    fn resource_exit_fires_once_per_excursion() {
+        let mut active = false;
+        assert!(!resource_exit_step(&mut active, true, true, false));
+        assert!(resource_exit_step(&mut active, false, true, true));
+        assert!(!resource_exit_step(&mut active, false, true, true));
+    }
+
+    #[test]
+    fn reused_pid_counts_as_exit_and_start() {
+        let previous: HashMap<_, _> = [process(10, 1000), process(11, 1000)].into();
+        let current: HashMap<_, _> = [process(10, 2000), process(11, 1000)].into();
+        assert_eq!(changed_processes(&current, &previous), vec![10]);
+        assert_eq!(changed_processes(&previous, &current), vec![10]);
+    }
+
+    #[test]
+    fn unreadable_creation_time_does_not_look_like_a_new_process() {
+        let previous: HashMap<_, _> = [process(10, 1000)].into();
+        let current: HashMap<_, _> = [process(10, 0)].into();
+        assert!(changed_processes(&current, &previous).is_empty());
+    }
+
+    fn lifecycle(script_id: &str, source: &str, source_id: Option<&str>) -> LifecycleEvent {
+        LifecycleEvent {
+            run_id: "r".into(),
+            script_id: script_id.into(),
+            status: "running".into(),
+            exit_code: None,
+            source: source.into(),
+            source_id: source_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn script_event_filters_by_script_id() {
+        let config = config(r#"{"script_id":"a"}"#);
+        assert!(script_event_matches(&config, "t", &lifecycle("a", "manual", None)));
+        assert!(!script_event_matches(&config, "t", &lifecycle("b", "manual", None)));
+    }
+
+    #[test]
+    fn script_event_ignores_runs_started_by_the_trigger_itself() {
+        let config = config("{}");
+        assert!(!script_event_matches(&config, "t", &lifecycle("a", "trigger", Some("t"))));
+        assert!(script_event_matches(&config, "t", &lifecycle("a", "trigger", Some("other"))));
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn process_name_matches_without_exe_suffix() {
+        let process = ProcessMeta {
+            pid: 1,
+            name: "explorer.exe".into(),
+            parent: 0,
+            created_ms: 0,
+            path: None,
+        };
+        let config: TriggerConfig =
+            serde_json::from_str(r#"{"name":"Explorer","parent":"WinLogon"}"#).unwrap();
+        assert!(process_matches(&config, &process, "winlogon.exe"));
+        let other: TriggerConfig = serde_json::from_str(r#"{"name":"explorer2"}"#).unwrap();
+        assert!(!process_matches(&other, &process, ""));
     }
 }

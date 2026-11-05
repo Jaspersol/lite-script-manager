@@ -11,10 +11,10 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, Notify};
 use uuid::Uuid;
 
 const LOG_RING_BYTES: usize = 256 * 1024;
@@ -159,7 +159,15 @@ impl JobHandle {
         }
     }
 
-    pub fn request_graceful(&self, pid: u32, runtime_id: &str) {
+    pub fn request_graceful(&self, pid: u32, pids: &[u32], runtime_id: &str, adopted: bool) {
+        if adopted {
+            // Adopted processes are not process-group leaders, so CTRL_BREAK never
+            // reaches them; only window messages can ask them to close.
+            for pid in pids {
+                post_wm_close(*pid);
+            }
+            return;
+        }
         if matches!(runtime_id, "autohotkey" | "autoit") {
             post_wm_close(pid);
         }
@@ -182,16 +190,16 @@ unsafe extern "system" fn close_window_for_pid(
     lparam: windows_sys::Win32::Foundation::LPARAM,
 ) -> windows_sys::Win32::Foundation::BOOL {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+        GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
     };
 
     let target_pid = lparam as u32;
     let mut window_pid = 0u32;
     unsafe {
         GetWindowThreadProcessId(hwnd, &mut window_pid);
-        if window_pid == target_pid && IsWindowVisible(hwnd) != 0 {
+        // Hidden windows count too: an AutoHotkey main window is hidden.
+        if window_pid == target_pid {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
-            return 0;
         }
     }
     1
@@ -205,11 +213,17 @@ fn post_wm_close(pid: u32) {
     }
 }
 
+/// `FreeConsole`/`AttachConsole` change the console of the whole process, so
+/// concurrent stops must not interleave.
+#[cfg(windows)]
+static CONSOLE_LOCK: StdMutex<()> = StdMutex::new(());
+
 #[cfg(windows)]
 fn generate_ctrl_break(pid: u32) {
     use windows_sys::Win32::System::Console::{
         AttachConsole, CTRL_BREAK_EVENT, FreeConsole, GenerateConsoleCtrlEvent,
     };
+    let _guard = CONSOLE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     unsafe {
         FreeConsole();
         if AttachConsole(pid) != 0 {
@@ -391,23 +405,39 @@ pub(crate) fn process_create_time_ms(_pid: u32) -> Option<i64> {
 
 #[cfg(windows)]
 pub fn process_alive(pid: u32) -> bool {
-    use windows_sys::Win32::Foundation::CloseHandle;
-    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
 
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            false
-        } else {
-            CloseHandle(handle);
-            true
+            return false;
         }
+        // A handle held elsewhere keeps an exited process openable, so check the exit code.
+        let mut code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        ok == 0 || code == STILL_ACTIVE as u32
     }
 }
 
 #[cfg(not(windows))]
 pub fn process_alive(_pid: u32) -> bool {
     false
+}
+
+/// True while any recorded process is alive and is still the one we saw start
+/// (the creation time guards against PID reuse).
+fn run_processes_alive(pids: &[u32], started: &[Option<i64>]) -> bool {
+    pids.iter().enumerate().any(|(index, pid)| {
+        process_alive(*pid)
+            && match started.get(index).copied().flatten() {
+                None => true,
+                Some(created) => process_create_time_ms(*pid) == Some(created),
+            }
+    })
 }
 
 #[cfg(windows)]
@@ -463,6 +493,7 @@ fn executable_allowed(script: &Script, exe: &str) -> bool {
         if spec
             .executables
             .iter()
+            .chain(runtime::adopt_executables(spec))
             .any(|candidate| candidate.eq_ignore_ascii_case(&exe))
         {
             return true;
@@ -492,18 +523,9 @@ impl Drop for AdoptingReset<'_> {
 
 #[cfg(windows)]
 fn spawn_adopted_monitor(app: AppHandle, handle: RunHandle) {
-    // A bare PID check is fooled by PID reuse; the creation time pins identity.
-    let created: Vec<(u32, Option<i64>)> = handle
-        .pids
-        .iter()
-        .map(|pid| (*pid, process_create_time_ms(*pid)))
-        .collect();
     tauri::async_runtime::spawn(async move {
         while handle.guard.active_processes() > 0
-            || created.iter().any(|(pid, started)| {
-                process_alive(*pid)
-                    && (started.is_none() || process_create_time_ms(*pid) == *started)
-            })
+            || run_processes_alive(&handle.pids, &handle.pid_started)
         {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
@@ -624,12 +646,17 @@ fn attach_running(app: &AppHandle, script: &Script) -> Option<RunStateEvent> {
             return None;
         }
     }
+    let pid_started = pids
+        .iter()
+        .map(|pid| process_create_time_ms(*pid))
+        .collect::<Vec<_>>();
     let handle = RunHandle {
         run_id: run_id.clone(),
         script_id: script.id.clone(),
         runtime_id: script.runtime_id.clone(),
         pid: pids[0],
         pids: pids.clone(),
+        pid_started,
         guard: guard.clone(),
         stopped: Arc::new(AtomicBool::new(false)),
         stop_reason: Arc::new(StdMutex::new(None)),
@@ -644,6 +671,8 @@ fn attach_running(app: &AppHandle, script: &Script) -> Option<RunStateEvent> {
         peak_memory: Arc::new(AtomicU64::new(0)),
         cpu_time: Arc::new(AtomicU64::new(0)),
         log_bytes: Arc::new(AtomicU64::new(0)),
+        finished: Arc::new(AtomicBool::new(false)),
+        done: Arc::new(Notify::new()),
     };
     if let Ok(mut runs) = state.runs.lock() {
         runs.insert(run_id.clone(), handle.clone());
@@ -663,6 +692,14 @@ fn attach_running(app: &AppHandle, script: &Script) -> Option<RunStateEvent> {
         source_id: None,
     };
     let _ = app.emit("run-state", event.clone());
+    let _ = state.lifecycle_tx.send(LifecycleEvent {
+        run_id: run_id.clone(),
+        script_id: script.id.clone(),
+        status: "running".into(),
+        exit_code: None,
+        source: "adopted".into(),
+        source_id: None,
+    });
     spawn_adopted_monitor(app.clone(), handle);
     logging::app_log(
         "INFO",
@@ -723,6 +760,11 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
             if managed_scripts.contains(&script.id) {
                 continue;
             }
+            let lock = script_lock(app, &script.id);
+            let _start_guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            if active_count(app, &script.id) > 0 {
+                continue;
+            }
 
             let pids = matching_pids(
                 &script,
@@ -764,12 +806,17 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
             }
 
             let stopped = Arc::new(AtomicBool::new(false));
+            let pid_started = pids
+                .iter()
+                .map(|pid| process_create_time_ms(*pid))
+                .collect::<Vec<_>>();
             let handle = RunHandle {
                 run_id: run_id.clone(),
                 script_id: script.id.clone(),
                 runtime_id: script.runtime_id.clone(),
                 pid: pids[0],
                 pids: pids.clone(),
+                pid_started,
                 guard: guard.clone(),
                 stopped: stopped.clone(),
                 stop_reason: Arc::new(StdMutex::new(None)),
@@ -784,6 +831,8 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                 peak_memory: Arc::new(AtomicU64::new(0)),
                 cpu_time: Arc::new(AtomicU64::new(0)),
                 log_bytes: Arc::new(AtomicU64::new(0)),
+                finished: Arc::new(AtomicBool::new(false)),
+                done: Arc::new(Notify::new()),
             };
             {
                 let mut runs = state
@@ -810,6 +859,14 @@ pub fn adopt_external(app: &AppHandle) -> Result<usize, String> {
                     source_id: None,
                 },
             );
+            let _ = state.lifecycle_tx.send(LifecycleEvent {
+                run_id: run_id.clone(),
+                script_id: script.id.clone(),
+                status: "running".into(),
+                exit_code: None,
+                source: "adopted".into(),
+                source_id: None,
+            });
             spawn_adopted_monitor(app.clone(), handle);
             adopted += 1;
         }
@@ -846,7 +903,7 @@ impl JobHandle {
         unsafe { if libc::kill(-self.pgid, 0) == 0 { 1 } else { 0 } }
     }
 
-    pub fn request_graceful(&self, _pid: u32, _runtime_id: &str) {
+    pub fn request_graceful(&self, _pid: u32, _pids: &[u32], _runtime_id: &str, _adopted: bool) {
         unsafe {
             libc::kill(-self.pgid, libc::SIGTERM);
         }
@@ -860,6 +917,8 @@ pub struct RunHandle {
     pub runtime_id: String,
     pub pid: u32,
     pub pids: Vec<u32>,
+    /// Creation time per entry of `pids`, to tell a reused PID from the original process.
+    pub pid_started: Vec<Option<i64>>,
     pub guard: Arc<JobHandle>,
     pub stopped: Arc<AtomicBool>,
     pub stop_reason: Arc<StdMutex<Option<String>>>,
@@ -874,6 +933,19 @@ pub struct RunHandle {
     pub peak_memory: Arc<AtomicU64>,
     pub cpu_time: Arc<AtomicU64>,
     pub log_bytes: Arc<AtomicU64>,
+    /// Set by the first `finish_run`; later calls for the same run are no-ops.
+    pub finished: Arc<AtomicBool>,
+    /// Signalled when the run is finalized, so per-run timers can exit early.
+    pub done: Arc<Notify>,
+}
+
+/// A start request waiting for a free instance slot (`queue` overlap policy).
+#[derive(Clone)]
+pub struct QueuedStart {
+    pub queued_id: String,
+    pub script: Script,
+    pub options: StartOptions,
+    pub started_at: i64,
 }
 
 fn tail_string(value: &str, max_chars: usize) -> String {
@@ -1155,6 +1227,9 @@ fn finish_run(
     exit_code: Option<i32>,
     error: Option<String>,
 ) {
+    if run.finished.swap(true, Ordering::SeqCst) {
+        return;
+    }
     let final_metrics = metrics::process_metrics(&run.pids);
     let peak = run
         .peak_memory
@@ -1185,6 +1260,7 @@ fn finish_run(
     if let Ok(mut runs) = state.runs.lock() {
         runs.remove(&run.run_id);
     }
+    run.done.notify_one();
     let _ = app.emit(
         "run-state",
         RunStateEvent {
@@ -1207,6 +1283,7 @@ fn finish_run(
         source: run.source.clone(),
         source_id: run.source_id.clone(),
     });
+    dispatch_queue_async(app, &run.script_id);
 }
 
 fn spawn_metrics_sampler(app: AppHandle, handle: RunHandle) {
@@ -1235,21 +1312,28 @@ fn spawn_metrics_sampler(app: AppHandle, handle: RunHandle) {
     });
 }
 
-fn spawn_timeout(app: AppHandle, handle: RunHandle) {
+fn spawn_timeout(app: AppHandle, handle: &RunHandle) {
     let Some(timeout_sec) = handle.timeout_sec.filter(|value| *value > 0) else {
         return;
     };
+    // Hold only the id and the notifier while sleeping: the full handle owns the
+    // log ring and the Job handle, which must be released when the run ends.
+    let run_id = handle.run_id.clone();
+    let done = handle.done.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(timeout_sec as u64)).await;
+        tokio::select! {
+            _ = done.notified() => return,
+            _ = tokio::time::sleep(Duration::from_secs(timeout_sec as u64)) => {}
+        }
         let state = app.state::<AppState>();
-        let active = state
+        let handle = state
             .runs
             .lock()
-            .map(|runs| runs.contains_key(&handle.run_id))
-            .unwrap_or(false);
-        if !active {
+            .ok()
+            .and_then(|runs| runs.get(&run_id).cloned());
+        let Some(handle) = handle else {
             return;
-        }
+        };
         if let Ok(mut reason) = handle.stop_reason.lock() {
             *reason = Some("timeout".into());
         }
@@ -1263,7 +1347,12 @@ fn spawn_timeout(app: AppHandle, handle: RunHandle) {
     });
 }
 
-fn spawn_waiter(app: AppHandle, mut child: tokio::process::Child, handle: RunHandle) {
+fn spawn_waiter(
+    app: AppHandle,
+    mut child: tokio::process::Child,
+    handle: RunHandle,
+    pumps: Vec<tauri::async_runtime::JoinHandle<()>>,
+) {
     tauri::async_runtime::spawn(async move {
         let wait_result = child.wait().await;
         let (exit_code, wait_error) = match wait_result {
@@ -1274,6 +1363,15 @@ fn spawn_waiter(app: AppHandle, mut child: tokio::process::Child, handle: RunHan
         while handle.guard.active_processes() > 0 {
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
+
+        // Output pumps end once every process holding the pipes is gone. Wait for
+        // them so the log tail and `log_bytes` are complete, but bound the wait.
+        let _ = tokio::time::timeout(Duration::from_secs(3), async {
+            for pump in pumps {
+                let _ = pump.await;
+            }
+        })
+        .await;
 
         let reason = handle
             .stop_reason
@@ -1334,7 +1432,7 @@ pub fn sweep_dead_runs(app: &AppHandle) {
                 now.saturating_sub(run.started_at) >= STALE_RUN_MIN_AGE.as_millis() as i64
             })
             .filter(|run| run.guard.active_processes() == 0)
-            .filter(|run| !run.pids.iter().any(|pid| process_alive(*pid)))
+            .filter(|run| !run_processes_alive(&run.pids, &run.pid_started))
             .cloned()
             .collect::<Vec<_>>()
     };
@@ -1347,9 +1445,14 @@ pub fn sweep_dead_runs(app: &AppHandle) {
     }
 }
 
-fn force_stop_script(app: &AppHandle, script_id: &str, reason: &str) {
-    let handles = app
-        .state::<AppState>()
+pub(crate) fn script_lock(app: &AppHandle, script_id: &str) -> Arc<StdMutex<()>> {
+    let state = app.state::<AppState>();
+    let mut locks = state.start_locks.lock().unwrap_or_else(|e| e.into_inner());
+    locks.entry(script_id.to_string()).or_default().clone()
+}
+
+fn script_handles(app: &AppHandle, script_id: &str) -> Vec<RunHandle> {
+    app.state::<AppState>()
         .runs
         .lock()
         .map(|runs| {
@@ -1358,16 +1461,190 @@ fn force_stop_script(app: &AppHandle, script_id: &str, reason: &str) {
                 .cloned()
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_default();
-    for handle in handles {
-        if let Ok(mut value) = handle.stop_reason.lock() {
-            *value = Some(reason.to_string());
-        }
-        handle.stopped.store(true, Ordering::SeqCst);
-        handle.guard.terminate();
-        terminate_process_trees(&handle.pids);
+        .unwrap_or_default()
+}
+
+/// Stops every instance of the script per its `stop_mode` and waits until none
+/// is left. `stop_handle` force-kills after `stop_timeout_sec`; the extra margin
+/// lets the waiter observe the exit.
+fn stop_and_wait(app: &AppHandle, script_id: &str, reason: &str) {
+    let handles = script_handles(app, script_id);
+    if handles.is_empty() {
+        return;
     }
-    std::thread::sleep(Duration::from_millis(250));
+    let timeout = handles
+        .iter()
+        .map(|handle| handle.stop_timeout_sec.max(1) as u64)
+        .max()
+        .unwrap_or(1);
+    for handle in &handles {
+        stop_handle(app, handle, reason, false);
+    }
+    let deadline = Instant::now() + Duration::from_secs(timeout + 3);
+    while active_count(app, script_id) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn take_queue(app: &AppHandle, script_id: Option<&str>) -> Vec<QueuedStart> {
+    let state = app.state::<AppState>();
+    let Ok(mut queues) = state.queues.lock() else {
+        return Vec::new();
+    };
+    match script_id {
+        Some(id) => queues
+            .remove(id)
+            .map(|queue| queue.into_iter().collect())
+            .unwrap_or_default(),
+        None => queues.drain().flat_map(|(_, queue)| queue).collect(),
+    }
+}
+
+/// Reports cancelled queue entries. When the script still has a running
+/// instance, that instance's own events carry the UI state, so the placeholder
+/// is not announced.
+fn settle_cancelled(app: &AppHandle, items: Vec<QueuedStart>) {
+    if items.is_empty() {
+        return;
+    }
+    let state = app.state::<AppState>();
+    if let Ok(conn) = state.db.lock() {
+        for item in &items {
+            let _ = db::mark_schedule_result_by_run(&conn, &item.queued_id, "stopped", None);
+        }
+    }
+    for item in items {
+        if active_count(app, &item.script.id) == 0 {
+            let _ = app.emit(
+                "run-state",
+                RunStateEvent {
+                    run_id: item.queued_id,
+                    script_id: item.script.id,
+                    status: "stopped".into(),
+                    exit_code: None,
+                    error: None,
+                    started_at: item.started_at,
+                    ended_at: Some(db::now_ms()),
+                    source: Some(item.options.source),
+                    source_id: item.options.source_id,
+                },
+            );
+        }
+    }
+    let _ = app.emit("schedules-changed", ());
+}
+
+/// Records the real run id for a start that was first reported as `queued-*`.
+fn bind_queued(app: &AppHandle, queued_id: &str, run_id: &str) {
+    let state = app.state::<AppState>();
+    if let Ok(conn) = state.db.lock() {
+        let _ = db::rebind_schedule_run(&conn, queued_id, run_id);
+    }
+    if let Ok(mut alias) = state.queue_alias.lock() {
+        if alias.len() >= 256 {
+            alias.clear();
+        }
+        alias.insert(queued_id.to_string(), run_id.to_string());
+    }
+    let _ = app.emit("schedules-changed", ());
+}
+
+/// The real run id a `queued-*` placeholder was started as, if it has started.
+pub fn queued_alias(app: &AppHandle, queued_id: &str) -> Option<String> {
+    app.state::<AppState>()
+        .queue_alias
+        .lock()
+        .ok()
+        .and_then(|alias| alias.get(queued_id).cloned())
+}
+
+fn dispatch_queue_async(app: &AppHandle, script_id: &str) {
+    let pending = app
+        .state::<AppState>()
+        .queues
+        .lock()
+        .map(|queues| queues.contains_key(script_id))
+        .unwrap_or(false);
+    if !pending {
+        return;
+    }
+    let app = app.clone();
+    let script_id = script_id.to_string();
+    tauri::async_runtime::spawn_blocking(move || dispatch_queue(&app, &script_id));
+}
+
+/// Starts queued entries in FIFO order while the script has free instance slots.
+fn dispatch_queue(app: &AppHandle, script_id: &str) {
+    let state = app.state::<AppState>();
+    let lock = script_lock(app, script_id);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if state.exiting.load(Ordering::SeqCst) {
+            return;
+        }
+        sweep_dead_runs(app);
+        let active = active_count(app, script_id);
+        let item = {
+            let Ok(mut queues) = state.queues.lock() else {
+                return;
+            };
+            let ready = queues
+                .get(script_id)
+                .and_then(|queue| queue.front())
+                .is_some_and(|front| active < front.script.max_instances.max(1) as usize);
+            if !ready {
+                if queues.get(script_id).is_some_and(|queue| queue.is_empty()) {
+                    queues.remove(script_id);
+                }
+                return;
+            }
+            let Some(queue) = queues.get_mut(script_id) else {
+                return;
+            };
+            let item = queue.pop_front();
+            if queue.is_empty() {
+                queues.remove(script_id);
+            }
+            item
+        };
+        let Some(item) = item else {
+            return;
+        };
+        let result = preflight(app, &item.script).and_then(|_| {
+            start_locked(
+                app,
+                item.script.clone(),
+                item.options.clone(),
+                false,
+                Some(item.queued_id.clone()),
+            )
+        });
+        if let Err(error) = result {
+            logging::app_log(
+                "WARN",
+                &format!("排队启动 {} 失败: {error}", item.script.name),
+            );
+            if let Ok(conn) = state.db.lock() {
+                let _ =
+                    db::mark_schedule_result_by_run(&conn, &item.queued_id, "failed", Some(&error));
+            }
+            let _ = app.emit(
+                "run-state",
+                RunStateEvent {
+                    run_id: item.queued_id,
+                    script_id: item.script.id,
+                    status: "failed".into(),
+                    exit_code: None,
+                    error: Some(error),
+                    started_at: item.started_at,
+                    ended_at: Some(db::now_ms()),
+                    source: Some(item.options.source),
+                    source_id: item.options.source_id,
+                },
+            );
+            let _ = app.emit("schedules-changed", ());
+        }
+    }
 }
 
 pub fn start(app: &AppHandle, script: Script) -> Result<RunStateEvent, String> {
@@ -1386,14 +1663,88 @@ pub fn start_with(
     script: Script,
     options: StartOptions,
 ) -> Result<RunStateEvent, String> {
+    start_inner(app, script, options, false)
+}
+
+/// Stops every instance of the script per its `stop_mode`, waits for them to
+/// exit, then starts a fresh one.
+pub fn restart_with(
+    app: &AppHandle,
+    script: Script,
+    options: StartOptions,
+) -> Result<RunStateEvent, String> {
+    start_inner(app, script, options, true)
+}
+
+fn start_inner(
+    app: &AppHandle,
+    script: Script,
+    options: StartOptions,
+    restart: bool,
+) -> Result<RunStateEvent, String> {
     preflight(app, &script)?;
     sweep_dead_runs(app);
+    // The instance-count check, overlap policy and `runs.insert` must not
+    // interleave with another start of the same script.
+    let lock = script_lock(app, &script.id);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    start_locked(app, script, options, restart, None)
+}
+
+fn enqueue(app: &AppHandle, script: Script, options: StartOptions) -> RunStateEvent {
+    let queued_id = format!("queued-{}", Uuid::new_v4());
+    let started_at = db::now_ms();
+    let event = RunStateEvent {
+        run_id: queued_id.clone(),
+        script_id: script.id.clone(),
+        status: "queued".into(),
+        exit_code: None,
+        error: None,
+        started_at,
+        ended_at: None,
+        source: Some(options.source.clone()),
+        source_id: options.source_id.clone(),
+    };
+    let script_id = script.id.clone();
+    if let Ok(mut queues) = app.state::<AppState>().queues.lock() {
+        queues
+            .entry(script_id.clone())
+            .or_default()
+            .push_back(QueuedStart {
+                queued_id,
+                script,
+                options,
+                started_at,
+            });
+    }
+    let _ = app.emit("run-state", event.clone());
+    // An instance may have finished between the count check and the push;
+    // dispatching again keeps the entry from being stranded.
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || dispatch_queue(&app, &script_id));
+    event
+}
+
+/// Caller holds the script lock.
+fn start_locked(
+    app: &AppHandle,
+    script: Script,
+    options: StartOptions,
+    restart: bool,
+    queued_id: Option<String>,
+) -> Result<RunStateEvent, String> {
+    if restart {
+        stop_and_wait(app, &script.id, "replace");
+    }
     // Adopt an instance still running from a previous session instead of
     // spawning a duplicate or refusing with "already running".
     if active_count(app, &script.id) == 0
         && script.max_instances <= 1
         && let Some(event) = attach_running(app, &script)
     {
+        if let Some(queued_id) = &queued_id {
+            bind_queued(app, queued_id, &event.run_id);
+        }
         return Ok(event);
     }
     let active = active_count(app, &script.id);
@@ -1406,60 +1757,8 @@ pub fn start_with(
                     script.name, active
                 ));
             }
-            "replace" => {
-                force_stop_script(app, &script.id, "replace");
-            }
-            "queue" => {
-                let queued_id = format!("queued-{}", Uuid::new_v4());
-                let started_at = db::now_ms();
-                let event = RunStateEvent {
-                    run_id: queued_id.clone(),
-                    script_id: script.id.clone(),
-                    status: "queued".into(),
-                    exit_code: None,
-                    error: None,
-                    started_at,
-                    ended_at: None,
-                    source: Some(options.source.clone()),
-                    source_id: options.source_id.clone(),
-                };
-                let _ = app.emit("run-state", event.clone());
-                let app_for_queue = app.clone();
-                let mut queued_options = options.clone();
-                queued_options.overlap_policy = "parallel".into();
-                tauri::async_runtime::spawn(async move {
-                    loop {
-                        if app_for_queue
-                            .state::<AppState>()
-                            .exiting
-                            .load(Ordering::SeqCst)
-                        {
-                            return;
-                        }
-                        if active_count(&app_for_queue, &script.id) == 0 {
-                            break;
-                        }
-                        tokio::time::sleep(Duration::from_millis(300)).await;
-                    }
-                    if let Err(error) = start_with(&app_for_queue, script.clone(), queued_options) {
-                        let _ = app_for_queue.emit(
-                            "run-state",
-                            RunStateEvent {
-                                run_id: queued_id,
-                                script_id: script.id,
-                                status: "failed".into(),
-                                exit_code: None,
-                                error: Some(error.clone()),
-                                started_at,
-                                ended_at: Some(db::now_ms()),
-                                source: Some("queue".into()),
-                                source_id: None,
-                            },
-                        );
-                    }
-                });
-                return Ok(event);
-            }
+            "replace" => stop_and_wait(app, &script.id, "replace"),
+            "queue" => return Ok(enqueue(app, script, options)),
             "parallel" => {
                 return Err(format!(
                     "{} 已达到最大实例数 {}，请调整实例策略",
@@ -1490,12 +1789,6 @@ pub fn start_with(
             return Err(error);
         }
     };
-    if let Err(error) = resume_process(pid) {
-        guard.terminate();
-        let _ = child.start_kill();
-        return Err(error);
-    }
-
     let state = app.state::<AppState>();
     let run_id = Uuid::new_v4().to_string();
     let started_at = db::now_ms();
@@ -1538,6 +1831,31 @@ pub fn start_with(
         }
     }
 
+    if let Some(queued_id) = &queued_id {
+        bind_queued(app, queued_id, &run_id);
+    }
+    // Resume only after the log and DB row exist, so a failure above never
+    // leaves a script that already started executing.
+    if let Err(error) = resume_process(pid) {
+        guard.terminate();
+        let _ = child.start_kill();
+        if let Ok(conn) = state.db.lock() {
+            let _ = db::finish_run(
+                &conn,
+                &run_id,
+                "failed",
+                None,
+                Some(&error),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        return Err(error);
+    }
+    let pid_started = vec![process_create_time_ms(pid)];
+
     let stopped = Arc::new(AtomicBool::new(false));
     let handle = RunHandle {
         run_id: run_id.clone(),
@@ -1545,6 +1863,7 @@ pub fn start_with(
         runtime_id: script.runtime_id.clone(),
         pid,
         pids: vec![pid],
+        pid_started,
         guard: guard.clone(),
         stopped: stopped.clone(),
         stop_reason: Arc::new(StdMutex::new(None)),
@@ -1559,6 +1878,8 @@ pub fn start_with(
         peak_memory: Arc::new(AtomicU64::new(0)),
         cpu_time: Arc::new(AtomicU64::new(0)),
         log_bytes: Arc::new(AtomicU64::new(0)),
+        finished: Arc::new(AtomicBool::new(false)),
+        done: Arc::new(Notify::new()),
     };
     if let Err(error) = state
         .runs
@@ -1605,22 +1926,23 @@ pub fn start_with(
         ring: handle.ring.clone(),
         log_bytes: handle.log_bytes.clone(),
     };
+    let mut pumps = Vec::new();
     if let Some(stdout) = child.stdout.take() {
         let sink = sink();
-        tauri::async_runtime::spawn(async move {
+        pumps.push(tauri::async_runtime::spawn(async move {
             pump_output(stdout, "stdout", sink).await;
-        });
+        }));
     }
     if let Some(stderr) = child.stderr.take() {
         let sink = sink();
-        tauri::async_runtime::spawn(async move {
+        pumps.push(tauri::async_runtime::spawn(async move {
             pump_output(stderr, "stderr", sink).await;
-        });
+        }));
     }
 
     spawn_metrics_sampler(app.clone(), handle.clone());
-    spawn_timeout(app.clone(), handle.clone());
-    spawn_waiter(app.clone(), child, handle);
+    spawn_timeout(app.clone(), &handle);
+    spawn_waiter(app.clone(), child, handle, pumps);
 
     Ok(event)
 }
@@ -1630,15 +1952,8 @@ fn stop_handle(app: &AppHandle, handle: &RunHandle, reason: &str, force: bool) {
     if let Ok(mut value) = handle.stop_reason.lock() {
         *value = Some(reason.to_string());
     }
-    let force = force || handle.stop_mode == "force";
-    if force {
-        handle.guard.terminate();
-        terminate_process_trees(&handle.pids);
-    } else {
-        handle
-            .guard
-            .request_graceful(handle.pid, &handle.runtime_id);
-    }
+    // Announce `stopping` before signalling: a process that dies at once lets
+    // the waiter emit `stopped`, and that must stay the last event the UI sees.
     let _ = app.emit(
         "run-state",
         RunStateEvent {
@@ -1653,10 +1968,18 @@ fn stop_handle(app: &AppHandle, handle: &RunHandle, reason: &str, force: bool) {
             source_id: handle.source_id.clone(),
         },
     );
-
+    let force = force || handle.stop_mode == "force";
     if force {
+        handle.guard.terminate();
+        terminate_process_trees(&handle.pids);
         return;
     }
+    handle.guard.request_graceful(
+        handle.pid,
+        &handle.pids,
+        &handle.runtime_id,
+        handle.source == "adopted",
+    );
     let app_for_timer = app.clone();
     let guard = handle.guard.clone();
     let pids = handle.pids.clone();
@@ -1678,17 +2001,25 @@ fn stop_handle(app: &AppHandle, handle: &RunHandle, reason: &str, force: bool) {
 }
 
 pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
+    stop_with_reason(app, script_id, "user")
+}
+
+/// Cancels pending queued starts of the script, then stops its running
+/// instances. `reason` is stored on the run (`user` disables loop schedules).
+pub fn stop_with_reason(app: &AppHandle, script_id: &str, reason: &str) -> Result<(), String> {
+    // Drop queued starts first so a finishing instance cannot launch them.
+    let cancelled = take_queue(app, Some(script_id));
+    let had_queue = !cancelled.is_empty();
+    settle_cancelled(app, cancelled);
+    match stop_instances(app, script_id, reason) {
+        Err(_) if had_queue => Ok(()),
+        other => other,
+    }
+}
+
+fn stop_instances(app: &AppHandle, script_id: &str, reason: &str) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut handles = {
-        let runs = state
-            .runs
-            .lock()
-            .map_err(|_| "运行状态锁失败".to_string())?;
-        runs.values()
-            .filter(|run| run.script_id == script_id)
-            .cloned()
-            .collect::<Vec<_>>()
-    };
+    let mut handles = script_handles(app, script_id);
     if handles.is_empty() {
         // Adopt a process still running from an earlier session so the stop
         // request targets a real handle.
@@ -1697,31 +2028,28 @@ pub fn stop(app: &AppHandle, script_id: &str) -> Result<(), String> {
             db::get_script(&conn, script_id)?
         }
         .ok_or_else(|| "脚本不存在".to_string())?;
-        if attach_running(app, &script).is_none() {
+        let attached = {
+            let lock = script_lock(app, script_id);
+            let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+            active_count(app, script_id) > 0 || attach_running(app, &script).is_some()
+        };
+        if !attached {
             return Err("脚本当前没有运行中的实例".to_string());
         }
-        handles = {
-            let runs = state
-                .runs
-                .lock()
-                .map_err(|_| "运行状态锁失败".to_string())?;
-            runs.values()
-                .filter(|run| run.script_id == script_id)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+        handles = script_handles(app, script_id);
         if handles.is_empty() {
             return Err("脚本当前没有运行中的实例".to_string());
         }
     }
     for handle in &handles {
-        stop_handle(app, handle, "user", false);
+        stop_handle(app, handle, reason, false);
     }
     Ok(())
 }
 
 pub fn stop_all(app: &AppHandle, force: bool) {
     let state = app.state::<AppState>();
+    settle_cancelled(app, take_queue(app, None));
     let handles = {
         let runs = state.runs.lock().ok();
         runs.map(|runs| runs.values().cloned().collect::<Vec<_>>())

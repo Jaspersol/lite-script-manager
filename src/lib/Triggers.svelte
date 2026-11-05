@@ -39,6 +39,7 @@
   let processName = $state("");
   let processPath = $state("");
   let processParent = $state("");
+  let scriptFilter = $state("");
   let command = $state("");
   let metric = $state("system.cpu");
   let op = $state(">=");
@@ -82,6 +83,10 @@
     return type === "process_started" || type === "process_exited";
   }
 
+  function scriptTypes(type = eventType): boolean {
+    return type === "script_started" || type === "script_exited";
+  }
+
   async function load() {
     try {
       triggers = await api.listTriggers();
@@ -112,6 +117,7 @@
     processName = "";
     processPath = "";
     processParent = "";
+    scriptFilter = "";
     command = "";
     metric = "system.cpu";
     op = ">=";
@@ -136,6 +142,7 @@
       processName = config.name ?? "";
       processPath = config.path ?? "";
       processParent = config.parent ?? "";
+      scriptFilter = config.script_id ?? "";
       command = config.command ?? "";
       metric = config.metric ?? config.conditions?.[0]?.metric ?? "system.cpu";
       op = config.op ?? config.conditions?.[0]?.op ?? ">=";
@@ -189,6 +196,9 @@
         config.conditions = [condition, ...originalConditions.slice(1)];
       }
       return JSON.stringify(config);
+    }
+    if (scriptTypes()) {
+      return JSON.stringify({ script_id: scriptFilter });
     }
     return "{}";
   }
@@ -410,6 +420,18 @@
           <div class="form-grid">
             <div class="field"><div class="label-row"><label class="label" for="trigger-process-path">{t("路径包含")}</label><Hint text={t("可选。进程可执行文件路径包含该字符串时才触发，用于区分同名进程。")} /></div><input id="trigger-process-path" class="input mono" bind:value={processPath} placeholder={t("D:\\\\Games（可选）")} /></div>
             <div class="field"><div class="label-row"><label class="label" for="trigger-command">{t("命令行包含")}</label><Hint text={t("可选。进程命令行包含该字符串时才触发。")} /></div><input id="trigger-command" class="input mono" bind:value={command} placeholder={t("--server（可选）")} /></div>
+          </div>
+        {/if}
+
+        {#if scriptTypes()}
+          <div class="form-section">{t("脚本匹配")}</div>
+          <div class="form-grid">
+            <div class="field"><div class="label-row"><label class="label" for="trigger-script">{t("监听脚本")}</label><Hint text={t("留空则匹配所有受管脚本。由本触发器自身启动的运行不会再次触发它。")} /></div>
+              <select id="trigger-script" class="select" bind:value={scriptFilter}>
+                <option value="">{t("任意脚本")}</option>
+                {#each scripts as item (item.id)}<option value={item.id}>{item.name}</option>{/each}
+              </select>
+            </div>
           </div>
         {/if}
 

@@ -8,11 +8,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::broadcast::error::RecvError;
 
 const CATCH_UP_LIMIT: usize = 10;
 
 pub fn wake(app: &AppHandle) {
-    app.state::<AppState>().scheduler_wake.notify_waiters();
+    // `notify_one` keeps a permit if the loop is busy, so the wake-up is not lost.
+    app.state::<AppState>().scheduler_wake.notify_one();
 }
 
 pub(crate) fn next_after(
@@ -150,16 +152,26 @@ fn fire_once(app: &AppHandle, schedule: &mut Schedule, scheduled_at: i64) -> Res
     match runner::start_with(app, script, options) {
         Ok(event) => {
             let state = app.state::<AppState>();
+            let mut run_id = event.run_id.clone();
+            let mut status = if event.status == "queued" {
+                "queued"
+            } else {
+                "running"
+            };
             if let Ok(conn) = state.db.lock() {
-                let _ = db::mark_schedule_started(&conn, &schedule.id, &event.run_id, now, next);
+                let _ = db::mark_schedule_started(&conn, &schedule.id, &run_id, now, next);
+                // The queued entry may have started before the placeholder was stored.
+                if event.status == "queued"
+                    && let Some(real) = runner::queued_alias(app, &run_id)
+                {
+                    let _ = db::rebind_schedule_run(&conn, &run_id, &real);
+                    run_id = real;
+                    status = "running";
+                }
             }
             schedule.last_run_at = Some(now);
-            schedule.last_run_id = Some(event.run_id);
-            schedule.last_status = Some(if event.status == "queued" {
-                "queued".into()
-            } else {
-                "running".into()
-            });
+            schedule.last_run_id = Some(run_id);
+            schedule.last_status = Some(status.into());
             schedule.next_run_at = next;
             let _ = app.emit("schedules-changed", ());
         }
@@ -284,23 +296,31 @@ fn scheduler_loop(app: AppHandle) {
             };
             let now = db::now_ms();
             let mut wake_at: Option<i64> = None;
-            for mut schedule in schedules {
+            for schedule in schedules {
                 if !schedule.enabled {
                     continue;
                 }
-                if let Err(error) = ensure_next(&app, &mut schedule) {
-                    logging::app_log("ERROR", &format!("计算计划时间失败: {error}"));
-                    continue;
-                }
-                match handle_due(&app, &mut schedule, now) {
-                    Ok(()) => {}
-                    Err(error) => {
+                // Starting and stopping scripts blocks (sleeps, process snapshots,
+                // SQLite), so it runs on the blocking pool.
+                let task_app = app.clone();
+                let task = tauri::async_runtime::spawn_blocking(move || {
+                    let mut schedule = schedule;
+                    if let Err(error) = ensure_next(&task_app, &mut schedule) {
+                        logging::app_log("ERROR", &format!("计算计划时间失败: {error}"));
+                        return None;
+                    }
+                    if let Err(error) = handle_due(&task_app, &mut schedule, now) {
                         logging::app_log(
                             "ERROR",
                             &format!("执行计划 {} 失败: {error}", schedule.name),
                         );
                     }
-                }
+                    Some(schedule)
+                })
+                .await;
+                let Ok(Some(schedule)) = task else {
+                    continue;
+                };
                 if let Some(next) = schedule.next_run_at {
                     wake_at = Some(wake_at.map_or(next, |current| current.min(next)));
                 }
@@ -321,7 +341,13 @@ fn lifecycle_loop(app: AppHandle, failures: Arc<Mutex<HashMap<String, i64>>>) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         let mut rx = state.lifecycle_tx.subscribe();
-        while let Ok(event) = rx.recv().await {
+        loop {
+            let event = match rx.recv().await {
+                Ok(event) => event,
+                // Missed events only cost a stale status; the listener must survive.
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => break,
+            };
             let schedules = match load_schedules(&app) {
                 Ok(values) => values,
                 Err(_) => continue,
@@ -456,17 +482,24 @@ pub fn run_now(app: &AppHandle, schedule: &Schedule) -> Result<String, String> {
         overlap_policy: schedule.overlap_policy.clone(),
     };
     let event = runner::start_with(app, script, options)?;
+    let mut run_id = event.run_id.clone();
     if let Ok(conn) = state.db.lock() {
         let _ = db::mark_schedule_started(
             &conn,
             &schedule.id,
-            &event.run_id,
+            &run_id,
             db::now_ms(),
             schedule.next_run_at,
         );
+        if event.status == "queued"
+            && let Some(real) = runner::queued_alias(app, &run_id)
+        {
+            let _ = db::rebind_schedule_run(&conn, &run_id, &real);
+            run_id = real;
+        }
     }
     let _ = app.emit("schedules-changed", ());
-    Ok(event.run_id)
+    Ok(run_id)
 }
 
 #[cfg(test)]
