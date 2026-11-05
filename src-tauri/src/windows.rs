@@ -238,6 +238,7 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
         .min_inner_size(900.0, 620.0)
         .center()
         .visible(false)
+        .disable_drag_drop_handler()
         .build()?;
 
     apply_light_caption(&window);
