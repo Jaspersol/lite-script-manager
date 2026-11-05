@@ -1,6 +1,6 @@
 [package]
 name = "litescriptmanager"
-version = "0.1.1"
+version = "0.1.2"
 description = "LiteScriptManager"
 authors = ["LiteScriptManager"]
 edition = "2024"
