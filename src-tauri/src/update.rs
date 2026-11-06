@@ -26,7 +26,7 @@ pub fn last_result() -> Option<UpdateInfo> {
 }
 
 /// Repository that hosts the releases used for updates.
-const REPO: &str = "Jaspersol/Lite-script-manager";
+const REPO: &str = "Jaspersol/lite-script-manager";
 const USER_AGENT: &str = "LiteScriptManager";
 /// Do not hit the GitHub API more than once per interval during automatic checks.
 const AUTO_CHECK_INTERVAL_MS: i64 = 6 * 60 * 60 * 1000;

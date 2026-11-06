@@ -77,7 +77,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ### Publishing a Release
 
-In-app updates read the latest GitHub Release of `Jaspersol/Lite-script-manager` through the GitHub API:
+In-app updates read the latest GitHub Release of `Jaspersol/lite-script-manager` through the GitHub API:
 
 1. Bump the version in `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json` so all three match
 2. Tag and push: `git tag v0.2.0 && git push origin v0.2.0`

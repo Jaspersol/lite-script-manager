@@ -206,7 +206,7 @@
         <div class="about-row">
           <div>
             <div class="about-name">LSM <span class="version-badge">v{appVersion || updateInfo?.current_version || "—"}</span></div>
-            <div class="muted tiny">{t("更新来自 GitHub Releases（Jaspersol/Lite-script-manager）")}</div>
+            <div class="muted tiny">{t("更新来自 GitHub Releases（Jaspersol/lite-script-manager）")}</div>
           </div>
           <button class="btn btn-sm" disabled={checking || installing} onclick={checkUpdate}>
             <Icon name="refresh" size={14} /> {checking ? t("检查中…") : t("检查更新")}

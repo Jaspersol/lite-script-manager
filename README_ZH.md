@@ -77,7 +77,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ### 发布新版本
 
-应用内更新通过 GitHub API 读取 `Jaspersol/Lite-script-manager` 的最新 Release：
+应用内更新通过 GitHub API 读取 `Jaspersol/lite-script-manager` 的最新 Release：
 
 1. 同时修改 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 中的版本号，保持三处一致
 2. 打标签并推送：`git tag v0.2.0 && git push origin v0.2.0`

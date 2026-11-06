@@ -47,7 +47,7 @@ export const settings: Record<string, string> = {
   // about & update
   关于与更新: "About & updates",
   "点击「检查更新」从 GitHub Releases 获取最新版本；下载完成后会以静默方式安装并重启应用。": "Click \"Check for updates\" to get the latest version from GitHub Releases. After the download finishes, it installs silently and restarts the app.",
-  "更新来自 GitHub Releases（Jaspersol/Lite-script-manager）": "Updates come from GitHub Releases (Jaspersol/Lite-script-manager)",
+  "更新来自 GitHub Releases（Jaspersol/lite-script-manager）": "Updates come from GitHub Releases (Jaspersol/lite-script-manager)",
   "检查中…": "Checking…",
   检查更新: "Check for updates",
   "启动时自动检查更新（每 6 小时最多一次）": "Check for updates on startup (at most once every 6 hours)",
