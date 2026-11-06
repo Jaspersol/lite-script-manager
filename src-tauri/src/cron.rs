@@ -126,7 +126,7 @@ impl CronSpec {
             &["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"],
             true,
         )?;
-        Ok(Self {
+        let spec = Self {
             seconds,
             minutes,
             hours,
@@ -135,7 +135,32 @@ impl CronSpec {
             weekdays,
             day_any,
             weekday_any,
-        })
+        };
+        if !spec.has_possible_date() {
+            return Err("Cron 表达式不会匹配任何日期（例如 2 月 30 日）".into());
+        }
+        Ok(spec)
+    }
+
+    /// A 400-year window covers every month/day/weekday combination of the
+    /// Gregorian calendar, so a bounded scan is exact. This rejects expressions
+    /// like `0 0 30 2 *` before they burn iterations on every computation.
+    fn has_possible_date(&self) -> bool {
+        if self.day_any && self.weekday_any {
+            return !self.months.iter().all(|value| !value);
+        }
+        let mut date = NaiveDate::from_ymd_opt(2000, 1, 1);
+        let end = NaiveDate::from_ymd_opt(2400, 1, 1);
+        while let Some(current) = date {
+            if Some(current) >= end {
+                break;
+            }
+            if self.months[(current.month() - 1) as usize] && self.day_matches(current) {
+                return true;
+            }
+            date = current.succ_opt();
+        }
+        false
     }
 
     fn day_matches(&self, date: NaiveDate) -> bool {
@@ -198,9 +223,31 @@ fn next_in_zone<TzImpl: TimeZone>(
             local += chrono::Duration::seconds(1);
             continue;
         }
+        let after_ms = after.timestamp_millis();
         match zone.from_local_datetime(&local) {
-            chrono::LocalResult::Single(value) => return Ok(value.timestamp_millis()),
-            chrono::LocalResult::Ambiguous(first, _) => return Ok(first.timestamp_millis()),
+            chrono::LocalResult::Single(value) => {
+                if value.timestamp_millis() > after_ms {
+                    return Ok(value.timestamp_millis());
+                }
+                local += chrono::Duration::seconds(1);
+            }
+            // Fall-back repeats the local hour: pick the earliest occurrence
+            // strictly after `after`, never one that is already in the past.
+            chrono::LocalResult::Ambiguous(first, second) => {
+                let candidate = if first.timestamp_millis() > after_ms {
+                    Some(first)
+                } else if second.timestamp_millis() > after_ms {
+                    Some(second)
+                } else {
+                    None
+                };
+                if let Some(value) = candidate {
+                    return Ok(value.timestamp_millis());
+                }
+                local += chrono::Duration::seconds(1);
+            }
+            // Spring-forward gaps have no matching local time; step over the
+            // gap minute by minute instead of trusting a single conversion.
             chrono::LocalResult::None => {
                 local += chrono::Duration::minutes(1);
             }
@@ -335,6 +382,12 @@ mod tests {
             .timestamp_millis()
     }
 
+    fn utc(value: &str) -> i64 {
+        DateTime::parse_from_rfc3339(value)
+            .unwrap()
+            .timestamp_millis()
+    }
+
     #[test]
     fn parses_five_and_six_fields() {
         assert!(CronSpec::parse("*/5 * * * *").is_ok());
@@ -358,5 +411,52 @@ mod tests {
     fn parses_interval_suffixes() {
         assert_eq!(parse_interval("5m").unwrap(), 300_000);
         assert_eq!(parse_interval("30").unwrap(), 30_000);
+    }
+
+    #[test]
+    fn rejects_impossible_calendar_dates() {
+        assert!(CronSpec::parse("0 0 30 2 *").is_err());
+        assert!(CronSpec::parse("0 0 31 4 *").is_err());
+        assert!(CronSpec::parse("0 0 31 2,4,6,9,11 *").is_err());
+        // Leap day exists, so this one is valid.
+        assert!(CronSpec::parse("0 0 29 2 *").is_ok());
+        assert!(CronSpec::parse("0 0 * * *").is_ok());
+        assert!(CronSpec::parse("0 0 * * MON").is_ok());
+        assert!(next_cron_after("0 0 30 2 *", "utc", at("2026-01-01 00:00:00")).is_err());
+    }
+
+    #[test]
+    fn fall_back_never_returns_a_past_occurrence() {
+        // 2026-11-01 in New York: 01:30 happens at 05:30Z (EDT) and again at
+        // 06:30Z (EST). From 06:15Z the next run must be the second one.
+        let after = utc("2026-11-01T06:15:00Z");
+        let next = next_cron_after("30 1 * * *", "America/New_York", after).unwrap();
+        assert_eq!(next, utc("2026-11-01T06:30:00Z"));
+        assert!(next > after);
+    }
+
+    #[test]
+    fn fall_back_picks_the_first_occurrence_when_it_is_still_ahead() {
+        let after = utc("2026-11-01T05:29:59Z");
+        let next = next_cron_after("30 1 * * *", "America/New_York", after).unwrap();
+        assert_eq!(next, utc("2026-11-01T05:30:00Z"));
+        assert!(next > after);
+    }
+
+    #[test]
+    fn fall_back_advances_past_both_occurrences() {
+        let after = utc("2026-11-01T06:30:00Z");
+        let next = next_cron_after("30 1 * * *", "America/New_York", after).unwrap();
+        assert_eq!(next, utc("2026-11-02T06:30:00Z"));
+        assert!(next > after);
+    }
+
+    #[test]
+    fn spring_forward_gap_moves_to_the_next_real_occurrence() {
+        // 2026-03-08 02:30 does not exist in New York.
+        let after = utc("2026-03-08T00:00:00Z");
+        let next = next_cron_after("30 2 * * *", "America/New_York", after).unwrap();
+        assert_eq!(next, utc("2026-03-09T06:30:00Z"));
+        assert!(next > after);
     }
 }

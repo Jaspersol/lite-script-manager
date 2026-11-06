@@ -13,8 +13,8 @@ use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
-use tokio::sync::{Mutex as AsyncMutex, Notify};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc};
 use uuid::Uuid;
 
 const LOG_RING_BYTES: usize = 256 * 1024;
@@ -959,7 +959,43 @@ fn tail_string(value: &str, max_chars: usize) -> String {
     }
 }
 
-fn success_code_allowed(expression: &str, code: i32) -> bool {
+/// Parses `0`, `10-12`, `0xC0000005` or `0xC0000005-0xC0000010`.
+fn parse_exit_code(token: &str) -> Option<u32> {
+    let token = token.trim();
+    if let Some(hex) = token
+        .strip_prefix("0x")
+        .or_else(|| token.strip_prefix("0X"))
+    {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    token.parse::<u32>().ok()
+}
+
+/// Rejects malformed `success_codes` before it is stored, so the run status is
+/// never computed from an expression the matcher cannot read.
+pub(crate) fn validate_success_codes(expression: &str) -> Result<(), String> {
+    let expression = expression.trim();
+    if expression.is_empty() || expression == "*" {
+        return Ok(());
+    }
+    for part in expression.split(',') {
+        let part = part.trim();
+        let valid = if let Some((start, end)) = part.split_once('-') {
+            match (parse_exit_code(start), parse_exit_code(end)) {
+                (Some(start), Some(end)) => start <= end,
+                _ => false,
+            }
+        } else {
+            parse_exit_code(part).is_some()
+        };
+        if !valid {
+            return Err(format!("成功退出码格式无效: {part}"));
+        }
+    }
+    Ok(())
+}
+
+fn success_code_allowed(expression: &str, code: u32) -> bool {
     let expression = expression.trim();
     if expression.is_empty() || expression == "*" {
         return true;
@@ -967,15 +1003,13 @@ fn success_code_allowed(expression: &str, code: i32) -> bool {
     for part in expression.split(',') {
         let part = part.trim();
         if let Some((start, end)) = part.split_once('-') {
-            let start = start.trim().parse::<i32>().ok();
-            let end = end.trim().parse::<i32>().ok();
-            if let (Some(start), Some(end)) = (start, end)
+            if let (Some(start), Some(end)) = (parse_exit_code(start), parse_exit_code(end))
                 && code >= start
                 && code <= end
             {
                 return true;
             }
-        } else if part.parse::<i32>().ok() == Some(code) {
+        } else if parse_exit_code(part) == Some(code) {
             return true;
         }
     }
@@ -1149,9 +1183,55 @@ struct OutputSink {
     log_bytes: Arc<AtomicU64>,
 }
 
+const OUTPUT_READ_CHUNK: usize = 8 * 1024;
+/// A line without a newline is emitted in pieces beyond this, so a process that
+/// never prints `\n` cannot grow the buffer without bound.
+const OUTPUT_PENDING_LIMIT: usize = 64 * 1024;
+
+/// Reads a pipe on a dedicated task and forwards complete lines. The read
+/// buffer lives across reads, so no byte is lost when the pump flushes early.
+fn spawn_line_reader<R>(mut reader: R, sender: mpsc::Sender<Vec<u8>>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        let mut buffer = [0u8; OUTPUT_READ_CHUNK];
+        let mut pending: Vec<u8> = Vec::new();
+        loop {
+            let read = match reader.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            pending.extend_from_slice(&buffer[..read]);
+            while let Some(index) = pending.iter().position(|byte| *byte == b'\n') {
+                let mut line: Vec<u8> = pending.drain(..=index).collect();
+                line.pop();
+                while line.last().is_some_and(|byte| *byte == b'\r') {
+                    line.pop();
+                }
+                if sender.send(line).await.is_err() {
+                    return;
+                }
+            }
+            while pending.len() > OUTPUT_PENDING_LIMIT {
+                let chunk: Vec<u8> = pending.drain(..OUTPUT_PENDING_LIMIT).collect();
+                if sender.send(chunk).await.is_err() {
+                    return;
+                }
+            }
+        }
+        while pending.last().is_some_and(|byte| *byte == b'\r') {
+            pending.pop();
+        }
+        if !pending.is_empty() {
+            let _ = sender.send(pending).await;
+        }
+    });
+}
+
 async fn pump_output<R>(reader: R, stream: &'static str, sink: OutputSink)
 where
-    R: tokio::io::AsyncRead + Unpin,
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     let OutputSink {
         log,
@@ -1161,13 +1241,13 @@ where
         ring,
         log_bytes,
     } = sink;
-    let mut reader = BufReader::new(reader);
+    let (sender, mut receiver) = mpsc::channel::<Vec<u8>>(256);
+    spawn_line_reader(reader, sender);
     let mut ticker = tokio::time::interval(Duration::from_millis(100));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut batch: Vec<LogLine> = Vec::new();
 
     loop {
-        let mut bytes = Vec::new();
         tokio::select! {
             _ = ticker.tick() => {
                 let _ = log.lock().await.flush().await;
@@ -1177,42 +1257,29 @@ where
                     batch.clear();
                 }
             }
-            result = reader.read_until(b'\n', &mut bytes) => {
-                match result {
-                    Ok(0) => {
-                        if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
-                            flush_log_batch(&app, &run_id, &script_id, &mut batch);
-                        }
-                        break;
+            bytes = receiver.recv() => {
+                let Some(bytes) = bytes else {
+                    if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                        flush_log_batch(&app, &run_id, &script_id, &mut batch);
                     }
-                    Ok(_) => {
-                        while bytes.last().is_some_and(|value| *value == b'\n' || *value == b'\r') {
-                            bytes.pop();
-                        }
-                        let line = tail_string(&logging::decode_output(&bytes), MAX_LINE_CHARS);
-                        let formatted = format!("[{stream}] {line}\n");
-                        {
-                            let mut file = log.lock().await;
-                            if file.write_all(formatted.as_bytes()).await.is_ok() {
-                                log_bytes.fetch_add(formatted.len() as u64, Ordering::Relaxed);
-                            }
-                        }
-                        if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
-                            ring.push(LogLine { stream: stream.to_string(), line: line.clone() });
-                            batch.push(LogLine { stream: stream.to_string(), line });
-                            if batch.len() >= 64 {
-                                flush_log_batch(&app, &run_id, &script_id, &mut batch);
-                            }
-                        } else {
-                            ring.push(LogLine { stream: stream.to_string(), line });
-                        }
+                    break;
+                };
+                let line = tail_string(&logging::decode_output(&bytes), MAX_LINE_CHARS);
+                let formatted = format!("[{stream}] {line}\n");
+                {
+                    let mut file = log.lock().await;
+                    if file.write_all(formatted.as_bytes()).await.is_ok() {
+                        log_bytes.fetch_add(formatted.len() as u64, Ordering::Relaxed);
                     }
-                    Err(_) => {
-                        if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
-                            flush_log_batch(&app, &run_id, &script_id, &mut batch);
-                        }
-                        break;
+                }
+                if app.state::<AppState>().log_streaming.load(Ordering::Relaxed) {
+                    ring.push(LogLine { stream: stream.to_string(), line: line.clone() });
+                    batch.push(LogLine { stream: stream.to_string(), line });
+                    if batch.len() >= 64 {
+                        flush_log_batch(&app, &run_id, &script_id, &mut batch);
                     }
+                } else {
+                    ring.push(LogLine { stream: stream.to_string(), line });
                 }
             }
         }
@@ -1224,7 +1291,7 @@ fn finish_run(
     app: &AppHandle,
     run: &RunHandle,
     status: &str,
-    exit_code: Option<i32>,
+    exit_code: Option<u32>,
     error: Option<String>,
 ) {
     if run.finished.swap(true, Ordering::SeqCst) {
@@ -1356,7 +1423,9 @@ fn spawn_waiter(
     tauri::async_runtime::spawn(async move {
         let wait_result = child.wait().await;
         let (exit_code, wait_error) = match wait_result {
-            Ok(status) => (status.code(), None),
+            // Windows exit codes above i32::MAX arrive as a negative i32; the raw
+            // DWORD is kept by reinterpreting the bits as unsigned.
+            Ok(status) => (status.code().map(|code| code as u32), None),
             Err(error) => (None, Some(format!("等待进程结束失败: {error}"))),
         };
 
@@ -1393,7 +1462,10 @@ fn spawn_waiter(
             if reason.as_deref() == Some("timeout") {
                 Some("运行超时".to_string())
             } else if final_status == "failed" {
-                Some(format!("进程退出码 {}", exit_code.unwrap_or(-1)))
+                Some(match exit_code {
+                    Some(code) => format!("进程退出码 {code}"),
+                    None => "进程因未知原因退出".to_string(),
+                })
             } else {
                 None
             }
@@ -1481,6 +1553,28 @@ fn stop_and_wait(app: &AppHandle, script_id: &str, reason: &str) {
         stop_handle(app, handle, reason, false);
     }
     let deadline = Instant::now() + Duration::from_secs(timeout + 3);
+    while active_count(app, script_id) > 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Stops every instance of the script before it is deleted. Graceful stop is
+/// tried first; whatever survives the wait is killed so deleting the script can
+/// never leave an orphan process that the UI no longer tracks.
+pub(crate) fn stop_for_delete(app: &AppHandle, script_id: &str) {
+    // Hold the script lock so a queue dispatch or start that is already in
+    // flight finishes before the queue is drained and the processes are killed.
+    let lock = script_lock(app, script_id);
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+    // Queued starts would otherwise be dispatched after the row is gone.
+    let _ = take_queue(app, Some(script_id));
+    stop_and_wait(app, script_id, "script_deleted");
+    for handle in script_handles(app, script_id) {
+        handle.stopped.store(true, Ordering::SeqCst);
+        handle.guard.terminate();
+        terminate_process_trees(&handle.pids);
+    }
+    let deadline = Instant::now() + Duration::from_secs(3);
     while active_count(app, script_id) > 0 && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -2109,9 +2203,68 @@ mod path_tests {
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
-    use super::{resume_process, success_code_allowed};
+    use super::{spawn_line_reader, success_code_allowed, validate_success_codes};
+    use std::time::Duration;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn keeps_partial_lines_across_reads() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let (sender, mut receiver) = mpsc::channel(8);
+        spawn_line_reader(reader, sender);
+        writer.write_all(b"hel").await.expect("write prefix");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        writer.write_all(b"lo\nwor").await.expect("write middle");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        writer.write_all(b"ld\r\n").await.expect("write suffix");
+        drop(writer);
+        assert_eq!(receiver.recv().await.expect("first line"), b"hello");
+        assert_eq!(receiver.recv().await.expect("second line"), b"world");
+        assert!(receiver.recv().await.is_none(), "channel closes at EOF");
+    }
+
+    #[tokio::test]
+    async fn flushes_the_partial_line_at_eof() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        let (sender, mut receiver) = mpsc::channel(8);
+        spawn_line_reader(reader, sender);
+        writer.write_all(b"tail\r").await.expect("write tail");
+        drop(writer);
+        assert_eq!(receiver.recv().await.expect("tail line"), b"tail");
+        assert!(receiver.recv().await.is_none(), "channel closes at EOF");
+    }
+
+    #[test]
+    fn checks_success_codes() {
+        assert!(success_code_allowed("0", 0));
+        assert!(!success_code_allowed("0", 1));
+        assert!(success_code_allowed("0,2,10-12", 11));
+        assert!(success_code_allowed("*", 9));
+    }
+
+    #[test]
+    fn accepts_unsigned_windows_exit_codes() {
+        assert!(success_code_allowed("3221225477", 3_221_225_477));
+        assert!(success_code_allowed("0xC0000005", 3_221_225_477));
+        assert!(success_code_allowed("0xC0000000-0xC0000010", 0xC000_0005));
+        assert!(!success_code_allowed("0xC0000005", 1));
+        assert!(validate_success_codes("0,2,10-12").is_ok());
+        assert!(validate_success_codes("0xC0000005").is_ok());
+        assert!(validate_success_codes("").is_ok());
+        assert!(validate_success_codes("*").is_ok());
+        assert!(validate_success_codes("0,abc").is_err());
+        assert!(validate_success_codes("4294967296").is_err());
+        assert!(validate_success_codes("-1").is_err());
+        assert!(validate_success_codes("10-2").is_err());
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::resume_process;
     use std::os::windows::process::CommandExt;
 
     #[test]
@@ -2128,13 +2281,5 @@ mod tests {
         }
         let status = child.wait().expect("wait for child");
         assert!(status.success());
-    }
-
-    #[test]
-    fn checks_success_codes() {
-        assert!(success_code_allowed("0", 0));
-        assert!(!success_code_allowed("0", 1));
-        assert!(success_code_allowed("0,2,10-12", 11));
-        assert!(success_code_allowed("*", 9));
     }
 }

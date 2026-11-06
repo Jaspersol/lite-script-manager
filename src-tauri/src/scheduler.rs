@@ -71,6 +71,19 @@ fn ensure_next(app: &AppHandle, schedule: &mut Schedule) -> Result<(), String> {
     if schedule.next_run_at.is_some() {
         return Ok(());
     }
+    if schedule.kind == "once" {
+        // A one-shot is done once it ran; the lifecycle handler disables it.
+        // Seeding again here would put `next_run_at` in the past and the run
+        // would be treated as missed and skipped.
+        if schedule.last_run_id.is_some() || schedule.last_run_at.is_some() {
+            return Ok(());
+        }
+        // Never reseed a one-shot that is currently running: the run is not
+        // missed, and a past timestamp would fire it again.
+        if runner::active_count(app, &schedule.script_id) > 0 {
+            return Ok(());
+        }
+    }
     // A loop re-arms from the lifecycle event of its own run. Seeding it here
     // while an instance is alive fires an immediate duplicate start every
     // scheduler pass, which the skip policy rejects and logs.
@@ -220,6 +233,15 @@ fn handle_due(app: &AppHandle, schedule: &mut Schedule, now: i64) -> Result<(), 
         return Ok(());
     };
     if next > now {
+        return Ok(());
+    }
+    // A queued one-shot only waits for a free instance slot: its 2-second
+    // retry timestamp must not be mistaken for a missed execution.
+    if schedule.kind == "once"
+        && schedule.last_status.as_deref() == Some("queued")
+        && runner::active_count(app, &schedule.script_id) > 0
+    {
+        set_next(app, schedule, Some(now + 2000))?;
         return Ok(());
     }
 

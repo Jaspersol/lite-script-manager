@@ -2,7 +2,7 @@
   import { confirmDialog } from "./confirm";
   import { onMount } from "svelte";
   import { api, formatTime, friendlyError } from "./api";
-  import { scriptName, statusLabel } from "./format";
+  import { isValidSuccessCodes, scriptName, statusLabel } from "./format";
   import { t, tBackend } from "./i18n.svelte";
   import { createListenerGroup } from "./listeners";
   import Icon from "./Icon.svelte";
@@ -97,6 +97,10 @@
     }
     if (!edit.script_id) {
       notify(t("请选择计划关联的脚本"), "error");
+      return;
+    }
+    if (!isValidSuccessCodes(edit.success_codes)) {
+      notify(t("成功退出码格式无效，请填写 0-4294967295 或 0x 开头的十六进制"), "error");
       return;
     }
     try {
@@ -334,8 +338,8 @@
             <input id="schedule-timeout" class="input" type="number" min="0" placeholder={t("留空使用脚本设置")} bind:value={edit.timeout_sec} />
           </div>
           <div class="field">
-            <div class="label-row"><label class="label" for="schedule-success">{t("成功退出码")}</label><Hint text={t("该计划判定成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12。")} /></div>
-            <input id="schedule-success" class="input mono" bind:value={edit.success_codes} placeholder={t("0 或 0,2,10-12")} />
+            <div class="label-row"><label class="label" for="schedule-success">{t("成功退出码")}</label><Hint text={t("该计划判定成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12；Windows 大退出码可写十进制（如 3221225477）或十六进制（如 0xC0000005）。")} /></div>
+            <input id="schedule-success" class="input mono" bind:value={edit.success_codes} placeholder={t("0 或 0,2,10-12 或 0xC0000005")} />
           </div>
           <div class="field">
             <div class="label-row"><label class="label" for="schedule-restarts">{t("最大重启次数")}</label><Hint text={t("失败后自动重启的次数上限，0 表示不自动重启。")} /></div>

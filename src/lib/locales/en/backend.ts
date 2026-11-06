@@ -48,6 +48,8 @@ export const backend: Record<string, string> = {
   等待进程结束失败: "Failed to wait for the process to exit",
   运行超时: "Run timed out",
   "进程退出码 {code}": "Process exit code {code}",
+  进程因未知原因退出: "The process exited for an unknown reason",
+  "成功退出码格式无效": "Invalid success exit codes",
   "{name} 已有 {count} 个实例运行中，已按 skip 策略跳过":
     "{name} already has {count} running instance(s); skipped by the skip policy",
   "{name} 已达到最大实例数 {max}，请调整实例策略":
@@ -73,6 +75,7 @@ export const backend: Record<string, string> = {
   初始化数据库失败: "Failed to initialize database",
   "升级数据库字段 {column} 失败: {error}": "Failed to upgrade database column {column}: {error}",
   "上次运行退出码 {code}": "Last run exit code {code}",
+  上次运行失败: "The last run failed",
   保存脚本失败: "Failed to save script",
   更新脚本失败: "Failed to update script",
   删除脚本失败: "Failed to delete script",
@@ -108,6 +111,11 @@ export const backend: Record<string, string> = {
   请先检查更新: "Check for updates first",
   当前已是最新版本: "You're on the latest version",
   该版本没有提供安装包: "This version does not provide an installer",
+  "该版本没有提供 .sha256 校验文件，已取消安装（无法验证安装包完整性）":
+    "This release has no .sha256 checksum file; installation cancelled because the package cannot be verified",
+  "更新重定向目标不在允许的 GitHub 域名内":
+    "The update redirect target is not on an allowed GitHub domain",
+  重定向次数过多: "Too many redirects",
   创建更新目录失败: "Failed to create update directory",
   "更新包校验失败：SHA256 不匹配": "Update package verification failed: SHA256 mismatch",
   "启动安装程序失败：错误码 {code}": "Failed to start installer: error code {code}",
@@ -158,6 +166,8 @@ export const backend: Record<string, string> = {
   "Cron 表达式需要 5 段（分 时 日 月 周）或 6 段（秒 分 时 日 月 周）":
     "A cron expression needs 5 fields (minute hour day month weekday) or 6 fields (second minute hour day month weekday)",
   "Cron 计算日期溢出": "Cron date calculation overflowed",
+  "Cron 表达式不会匹配任何日期（例如 2 月 30 日）":
+    "This cron expression never matches any date (e.g. February 30)",
   "未来 8 年内没有匹配的执行时间": "No matching run time within the next 8 years",
   未知时区: "Unknown time zone",
   时间戳无效: "Invalid timestamp",

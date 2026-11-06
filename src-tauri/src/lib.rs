@@ -280,6 +280,7 @@ fn update_script(
     if edit.name.trim().is_empty() {
         return Err("脚本名称不能为空".to_string());
     }
+    runner::validate_success_codes(&edit.success_codes)?;
     let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
     db::update_script(&conn, &id, &edit)?;
     let script = db::get_script(&conn, &id)?.ok_or_else(|| "脚本不存在".to_string())?;
@@ -315,18 +316,29 @@ fn pin_script_hash(
 }
 
 #[tauri::command]
-fn delete_script(
+async fn delete_script(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     id: String,
     delete_file: bool,
 ) -> Result<(), String> {
     let path = {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
-        let script = db::get_script(&conn, &id)?.ok_or_else(|| "脚本不存在".to_string())?;
-        db::delete_script(&conn, &id)?;
-        script.path
+        db::get_script(&conn, &id)?
+            .ok_or_else(|| "脚本不存在".to_string())?
+            .path
     };
+    // Stop the process tree before the row disappears, otherwise the running
+    // process keeps going with no UI entry left to stop it.
+    let stop_app = app.clone();
+    let stop_id = id.clone();
+    tauri::async_runtime::spawn_blocking(move || runner::stop_for_delete(&stop_app, &stop_id))
+        .await
+        .map_err(|e| format!("停止脚本失败: {e}"))?;
+    {
+        let mut conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
+        db::delete_script(&mut conn, &id)?;
+    }
     if delete_file {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -335,6 +347,8 @@ fn delete_script(
     }
     scheduler::wake(&app);
     emit_changed(&app);
+    // Trigger actions that referenced the script may have been trimmed.
+    let _ = app.emit("triggers-changed", ());
     Ok(())
 }
 
@@ -530,6 +544,7 @@ fn create_schedule(
     if edit.name.trim().is_empty() {
         return Err("计划名称不能为空".to_string());
     }
+    runner::validate_success_codes(&edit.success_codes)?;
     {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;
         if db::get_script(&conn, &edit.script_id)?.is_none() {
@@ -580,6 +595,7 @@ fn update_schedule(
     if edit.name.trim().is_empty() {
         return Err("计划名称不能为空".to_string());
     }
+    runner::validate_success_codes(&edit.success_codes)?;
     let next = schedule_next_for_edit(&edit)?;
     {
         let conn = state.db.lock().map_err(|_| "数据库锁失败".to_string())?;

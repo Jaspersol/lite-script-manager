@@ -62,3 +62,45 @@ export function scriptName(scripts: Script[], id: string): string {
 export function formatLogLine(line: { stream: string; line: string }): string {
   return `[${line.stream}] ${line.line}`;
 }
+
+const EXIT_CODE_LIMIT = 0xffffffff;
+
+function parseExitCodeToken(token: string): number | null {
+  const value = token.trim();
+  if (!value) return null;
+  if (/^0x[0-9a-f]+$/i.test(value)) {
+    const parsed = Number.parseInt(value.slice(2), 16);
+    return Number.isNaN(parsed) || parsed > EXIT_CODE_LIMIT ? null : parsed;
+  }
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return parsed > EXIT_CODE_LIMIT ? null : parsed;
+}
+
+/**
+ * Accepts `0`, `0,2,10-12`, `0xC0000005` and ranges of either form. Windows
+ * exit codes above 2^31 are unsigned, so decimal values up to 4294967295 are valid.
+ */
+export function isValidSuccessCodes(input: string): boolean {
+  const text = input.trim();
+  if (!text || text === "*") return true;
+  return text.split(",").every((part) => {
+    const token = part.trim();
+    if (!token) return false;
+    const dash = token.indexOf("-");
+    if (dash > 0) {
+      const start = parseExitCodeToken(token.slice(0, dash));
+      const end = parseExitCodeToken(token.slice(dash + 1));
+      return start !== null && end !== null && start <= end;
+    }
+    return parseExitCodeToken(token) !== null;
+  });
+}
+
+/** Shows the unsigned exit code and its hex form for Windows NTSTATUS values. */
+export function exitCodeText(code: number | null | undefined): string {
+  if (code == null) return "—";
+  const value = code >>> 0;
+  if (value < 0x80000000) return String(value);
+  return `${value} (0x${value.toString(16).toUpperCase().padStart(8, "0")})`;
+}

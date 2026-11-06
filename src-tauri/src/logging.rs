@@ -1,6 +1,6 @@
 use crate::models::LogLine;
 use crate::settings;
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
 use std::io::{Read, Write};
@@ -177,7 +177,7 @@ const AUTO_PRUNE_INTERVAL: Duration = Duration::from_secs(600);
 pub fn prune_logs(conn: &Connection, data_dir: &Path) -> Result<(), String> {
     let retention_days = settings::get_i64(conn, "log_retention_days", 14).max(0);
     let max_bytes = settings::get_i64(conn, "log_max_total_mb", 200).max(0) as u64 * 1024 * 1024;
-    prune_log_files(data_dir, retention_days, max_bytes)
+    prune_log_files(conn, data_dir, retention_days, max_bytes)
 }
 
 /// Runs at most once per [`AUTO_PRUNE_INTERVAL`].
@@ -196,23 +196,63 @@ pub fn auto_prune_logs(db: &Mutex<Connection>, data_dir: &Path) {
     if !due {
         return;
     }
-    let limits = db.lock().ok().map(|conn| {
-        (
-            settings::get_i64(&conn, "log_retention_days", 14).max(0),
-            settings::get_i64(&conn, "log_max_total_mb", 200).max(0) as u64 * 1024 * 1024,
-        )
-    });
-    let Some((retention_days, max_bytes)) = limits else {
-        return;
-    };
-    let _ = prune_log_files(data_dir, retention_days, max_bytes);
+    if let Ok(conn) = db.lock() {
+        let retention_days = settings::get_i64(&conn, "log_retention_days", 14).max(0);
+        let max_bytes =
+            settings::get_i64(&conn, "log_max_total_mb", 200).max(0) as u64 * 1024 * 1024;
+        let _ = prune_log_files(&conn, data_dir, retention_days, max_bytes);
+    }
 }
 
-fn prune_log_files(data_dir: &Path, retention_days: i64, max_bytes: u64) -> Result<(), String> {
+/// Returns the lowercased canonical form used to compare log paths.
+fn normalise_log_path(path: &Path) -> String {
+    std::fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_lowercase()
+}
+
+/// Log files that a live run still appends to; pruning must never remove them.
+fn active_log_paths(conn: &Connection) -> Vec<String> {
+    let Ok(mut statement) = conn.prepare(
+        "SELECT log_path FROM runs
+         WHERE log_path IS NOT NULL AND status IN ('running', 'stopping', 'starting', 'queued')",
+    ) else {
+        return Vec::new();
+    };
+    let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) else {
+        return Vec::new();
+    };
+    rows.flatten()
+        .map(|path| normalise_log_path(Path::new(&path)))
+        .collect()
+}
+
+/// Drops the log reference from the run so the UI does not point at a missing file.
+fn clear_run_log_path(conn: &Connection, path: &Path) {
+    let Some(run_id) = path.file_stem().and_then(|value| value.to_str()) else {
+        return;
+    };
+    let _ = conn.execute(
+        "UPDATE runs SET log_path=NULL WHERE id=?1 AND log_path IS NOT NULL",
+        params![run_id],
+    );
+}
+
+/// `retention_days == 0` means "no age-based cleanup" and `max_bytes == 0` means
+/// "no size cap"; both keep files instead of deleting them. The log file of a
+/// live run is never removed.
+fn prune_log_files(
+    conn: &Connection,
+    data_dir: &Path,
+    retention_days: i64,
+    max_bytes: u64,
+) -> Result<(), String> {
     let root = data_dir.join("logs");
     if !root.exists() {
         return Ok(());
     }
+    let active = active_log_paths(conn);
     let mut files: Vec<(PathBuf, SystemTime, u64)> = Vec::new();
     let mut stack = vec![root.clone()];
     while let Some(directory) = stack.pop() {
@@ -225,6 +265,7 @@ fn prune_log_files(data_dir: &Path, retention_days: i64, max_bytes: u64) -> Resu
                 stack.push(path);
             } else if path.extension().and_then(|v| v.to_str()) == Some("log")
                 && path.file_name().and_then(|v| v.to_str()) != Some("app.log")
+                && !active.contains(&normalise_log_path(&path))
             {
                 let Ok(metadata) = entry.metadata() else {
                     continue;
@@ -234,24 +275,146 @@ fn prune_log_files(data_dir: &Path, retention_days: i64, max_bytes: u64) -> Resu
             }
         }
     }
-    let cutoff = SystemTime::now()
-        .checked_sub(Duration::from_secs(retention_days as u64 * 86_400))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    for (path, modified, _) in &files {
-        if retention_days == 0 || *modified < cutoff {
-            let _ = std::fs::remove_file(path);
+
+    let mut removed: Vec<PathBuf> = Vec::new();
+    if retention_days > 0 {
+        let cutoff = SystemTime::now()
+            .checked_sub(Duration::from_secs(retention_days as u64 * 86_400))
+            .unwrap_or(SystemTime::UNIX_EPOCH);
+        for (path, modified, _) in &files {
+            if *modified < cutoff && std::fs::remove_file(path).is_ok() {
+                removed.push(path.clone());
+            }
+        }
+        files.retain(|(path, _, _)| !removed.contains(path));
+    }
+
+    if max_bytes > 0 {
+        let mut total = files.iter().map(|(_, _, size)| *size).sum::<u64>();
+        files.sort_by_key(|(_, modified, _)| *modified);
+        for (path, _, size) in files {
+            if total <= max_bytes {
+                break;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                total = total.saturating_sub(size);
+                removed.push(path);
+            }
         }
     }
-    files.retain(|(_, modified, _)| retention_days > 0 && *modified >= cutoff);
-    let mut total = files.iter().map(|(_, _, size)| *size).sum::<u64>();
-    files.sort_by_key(|(_, modified, _)| *modified);
-    for (path, _, size) in files {
-        if total <= max_bytes {
-            break;
-        }
-        if std::fs::remove_file(&path).is_ok() {
-            total = total.saturating_sub(size);
-        }
+
+    for path in removed {
+        clear_run_log_path(conn, &path);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> (Connection, PathBuf) {
+        let conn = Connection::open_in_memory().expect("open memory database");
+        conn.execute_batch(
+            "CREATE TABLE runs (id TEXT PRIMARY KEY, log_path TEXT, status TEXT NOT NULL);",
+        )
+        .expect("create runs table");
+        let dir = std::env::temp_dir().join(format!("lsm-prune-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("logs").join("script-1")).expect("create log dir");
+        (conn, dir)
+    }
+
+    fn write_log(
+        conn: &Connection,
+        dir: &Path,
+        run_id: &str,
+        status: &str,
+        bytes: usize,
+    ) -> PathBuf {
+        let path = dir
+            .join("logs")
+            .join("script-1")
+            .join(format!("{run_id}.log"));
+        std::fs::write(&path, vec![b'x'; bytes]).expect("write log file");
+        conn.execute(
+            "INSERT INTO runs (id, log_path, status) VALUES (?1, ?2, ?3)",
+            params![run_id, path.display().to_string(), status],
+        )
+        .expect("insert run");
+        path
+    }
+
+    fn stored_path(conn: &Connection, run_id: &str) -> Option<String> {
+        conn.query_row(
+            "SELECT log_path FROM runs WHERE id=?1",
+            params![run_id],
+            |row| row.get(0),
+        )
+        .expect("read log path")
+    }
+
+    #[test]
+    fn zero_limits_keep_every_log() {
+        let (conn, dir) = setup();
+        let active = write_log(&conn, &dir, "active-run", "running", 4);
+        let older = write_log(&conn, &dir, "run-a", "exited", 4);
+        let newest = write_log(&conn, &dir, "run-b", "exited", 4);
+
+        prune_log_files(&conn, &dir, 0, 0).expect("prune");
+
+        assert!(active.exists(), "active log must survive");
+        assert!(older.exists(), "retention 0 keeps logs");
+        assert!(newest.exists(), "size cap 0 keeps logs");
+        assert!(stored_path(&conn, "run-a").is_some());
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn size_cap_removes_oldest_but_never_the_active_log() {
+        let (conn, dir) = setup();
+        let active = write_log(&conn, &dir, "active-run", "running", 4);
+        let first = write_log(&conn, &dir, "run-a", "exited", 4);
+        let second = write_log(&conn, &dir, "run-b", "exited", 4);
+
+        // Two inactive files of 4 bytes each: the oldest is dropped to fit 4.
+        prune_log_files(&conn, &dir, 0, 4).expect("prune");
+        assert!(active.exists(), "active log must survive");
+        let removed_first = !first.exists();
+        let removed_second = !second.exists();
+        assert!(
+            removed_first ^ removed_second,
+            "exactly one inactive log is removed"
+        );
+        if removed_first {
+            assert_eq!(stored_path(&conn, "run-a"), None);
+            assert!(second.exists());
+            assert!(stored_path(&conn, "run-b").is_some());
+        } else {
+            assert_eq!(stored_path(&conn, "run-b"), None);
+            assert!(first.exists());
+            assert!(stored_path(&conn, "run-a").is_some());
+        }
+
+        // Shrinking the cap below the last inactive file removes it too.
+        prune_log_files(&conn, &dir, 0, 1).expect("prune");
+        assert!(active.exists(), "active log must always survive");
+        assert!(!first.exists() && !second.exists());
+        assert_eq!(stored_path(&conn, "run-a"), None);
+        assert_eq!(stored_path(&conn, "run-b"), None);
+        assert!(stored_path(&conn, "active-run").is_some());
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    #[test]
+    fn age_limit_keeps_fresh_logs() {
+        let (conn, dir) = setup();
+        let log = write_log(&conn, &dir, "run-a", "exited", 4);
+
+        prune_log_files(&conn, &dir, 1, 0).expect("prune");
+        assert!(log.exists(), "a one-day-old log is still fresh");
+
+        std::fs::remove_dir_all(dir).expect("cleanup");
+    }
 }

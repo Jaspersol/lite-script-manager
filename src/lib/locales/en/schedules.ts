@@ -82,9 +82,10 @@ export const schedules: Record<string, string> = {
     "A run longer than this is stopped and marked as failed. Leave empty to use the script's own setting.",
   "留空使用脚本设置": "Empty = use script setting",
   "成功退出码": "Success exit codes",
-  "该计划判定成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12。":
-    "Exit codes this schedule treats as success. Separate multiple codes with commas; ranges are allowed, e.g. 0,2,10-12.",
-  "0 或 0,2,10-12": "0 or 0,2,10-12",
+  "该计划判定成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12；Windows 大退出码可写十进制（如 3221225477）或十六进制（如 0xC0000005）。":
+    "Exit codes this schedule treats as success. Separate multiple codes with commas; ranges are allowed, e.g. 0,2,10-12. Large Windows exit codes may be written in decimal (e.g. 3221225477) or hex (e.g. 0xC0000005).",
+  "0 或 0,2,10-12 或 0xC0000005": "0, 0,2,10-12 or 0xC0000005",
+  "成功退出码格式无效，请填写 0-4294967295 或 0x 开头的十六进制": "Invalid success exit codes. Enter values from 0 to 4294967295, or hex values starting with 0x.",
   "最大重启次数": "Max restarts",
   "失败后自动重启的次数上限，0 表示不自动重启。": "Upper limit of automatic restarts after a failure. 0 means no automatic restart.",
   "退出后延迟秒数": "Delay after exit (seconds)",

@@ -147,6 +147,13 @@ pub fn open(data_dir: &Path) -> Result<Connection, String> {
          WHERE status IN ('running','stopping','starting','queued')",
         params![now_ms()],
     );
+    // Older builds stored Windows exit codes as signed i32, so codes above
+    // i32::MAX (e.g. 0xC0000005) were persisted as negative numbers. Reinterpret
+    // those bits as unsigned; rows that are already positive are untouched.
+    let _ = conn.execute(
+        "UPDATE runs SET exit_code = exit_code + 4294967296 WHERE exit_code < 0",
+        [],
+    );
     set_setting(&conn, "app_version", env!("CARGO_PKG_VERSION"))?;
     Ok(conn)
 }
@@ -190,7 +197,7 @@ fn script_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Script> {
     let last_run_id: Option<String> = row.get(20)?;
     let last_status: Option<String> = row.get(21)?;
     let last_error: Option<String> = row.get(22)?;
-    let last_exit: Option<i32> = row.get(23)?;
+    let last_exit: Option<u32> = row.get(23)?;
     let mut script = Script {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -226,7 +233,10 @@ fn script_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Script> {
         };
         script.last_error = last_error.or_else(|| {
             if status == "failed" {
-                Some(format!("上次运行退出码 {}", last_exit.unwrap_or(-1)))
+                Some(match last_exit {
+                    Some(code) => format!("上次运行退出码 {code}"),
+                    None => "上次运行失败".to_string(),
+                })
             } else {
                 None
             }
@@ -328,11 +338,57 @@ pub fn set_script_hash(conn: &Connection, id: &str, hash: Option<&str>) -> Resul
     Ok(())
 }
 
-pub fn delete_script(conn: &Connection, id: &str) -> Result<(), String> {
-    conn.execute("DELETE FROM schedules WHERE script_id=?1", params![id])
+/// Removes a script together with its schedules and every trigger action that
+/// still references it. Actions left empty disable the trigger, so a deleted
+/// script cannot be fired from a half-broken action list.
+pub fn delete_script(conn: &mut Connection, id: &str) -> Result<(), String> {
+    let tx = conn
+        .transaction()
         .map_err(|e| format!("数据库操作失败: {e}"))?;
-    conn.execute("DELETE FROM scripts WHERE id=?1", params![id])
+    tx.execute("DELETE FROM schedules WHERE script_id=?1", params![id])
+        .map_err(|e| format!("数据库操作失败: {e}"))?;
+
+    let triggers = {
+        let mut statement = tx
+            .prepare("SELECT id, actions_json FROM triggers")
+            .map_err(|e| format!("数据库操作失败: {e}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|e| format!("数据库操作失败: {e}"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e| format!("数据库操作失败: {e}"))?
+    };
+    for (trigger_id, actions_json) in triggers {
+        let Ok(mut actions) = serde_json::from_str::<Vec<serde_json::Value>>(&actions_json) else {
+            continue;
+        };
+        let before = actions.len();
+        actions
+            .retain(|action| action.get("script_id").and_then(|value| value.as_str()) != Some(id));
+        if actions.len() == before {
+            continue;
+        }
+        let encoded = serde_json::to_string(&actions).unwrap_or_else(|_| "[]".into());
+        if actions.is_empty() {
+            tx.execute(
+                "UPDATE triggers SET actions_json='[]', enabled=0, updated_at=?2 WHERE id=?1",
+                params![trigger_id, now_ms()],
+            )
+            .map_err(|e| format!("数据库操作失败: {e}"))?;
+        } else {
+            tx.execute(
+                "UPDATE triggers SET actions_json=?2, updated_at=?3 WHERE id=?1",
+                params![trigger_id, encoded, now_ms()],
+            )
+            .map_err(|e| format!("数据库操作失败: {e}"))?;
+        }
+    }
+
+    tx.execute("DELETE FROM scripts WHERE id=?1", params![id])
         .map_err(|e| format!("删除脚本失败: {e}"))?;
+    tx.commit().map_err(|e| format!("数据库操作失败: {e}"))?;
     Ok(())
 }
 
@@ -406,7 +462,7 @@ pub fn finish_run(
     conn: &Connection,
     run_id: &str,
     status: &str,
-    exit_code: Option<i32>,
+    exit_code: Option<u32>,
     error: Option<&str>,
     stop_reason: Option<&str>,
     peak_memory_bytes: Option<i64>,
@@ -963,6 +1019,69 @@ mod tests {
         assert_eq!(loaded.name, "updated");
         assert_eq!(loaded.expression, "*/5 * * * *");
         assert_eq!(loaded.next_run_at, Some(12_345));
+
+        insert_trigger(
+            &conn,
+            &Trigger {
+                id: "trigger-1".into(),
+                name: "mixed".into(),
+                enabled: true,
+                event_type: "process".into(),
+                config_json: "{}".into(),
+                actions_json:
+                    r#"[{"type":"run_script","script_id":"script-1"},{"type":"notify","title":"a","message":"b"}]"#
+                        .into(),
+                cooldown_sec: 0,
+                last_triggered_at: None,
+                last_result: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .expect("insert mixed trigger");
+        insert_trigger(
+            &conn,
+            &Trigger {
+                id: "trigger-2".into(),
+                name: "only-deleted-script".into(),
+                enabled: true,
+                event_type: "process".into(),
+                config_json: "{}".into(),
+                actions_json: r#"[{"type":"run_script","script_id":"script-1"}]"#.into(),
+                cooldown_sec: 0,
+                last_triggered_at: None,
+                last_result: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .expect("insert single-action trigger");
+
+        let mut conn = conn;
+        delete_script(&mut conn, "script-1").expect("delete script");
+        assert!(get_script(&conn, "script-1").expect("get script").is_none());
+        assert!(
+            get_schedule(&conn, "schedule-1")
+                .expect("get schedule")
+                .is_none()
+        );
+        let mixed = get_trigger(&conn, "trigger-1")
+            .expect("get trigger")
+            .expect("trigger present");
+        assert!(mixed.enabled);
+        let actions: Vec<serde_json::Value> =
+            serde_json::from_str(&mixed.actions_json).expect("actions json");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].get("type").and_then(|value| value.as_str()),
+            Some("notify")
+        );
+        let orphan = get_trigger(&conn, "trigger-2")
+            .expect("get trigger")
+            .expect("trigger present");
+        assert!(!orphan.enabled, "a trigger with no actions is disabled");
+        assert_eq!(orphan.actions_json, "[]");
+
         drop(conn);
         std::fs::remove_dir_all(dir).expect("remove database dir");
     }

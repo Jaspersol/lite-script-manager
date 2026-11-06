@@ -2,7 +2,7 @@
   import { confirmDialog } from "./confirm";
   import { onMount } from "svelte";
   import { api, formatBytes, formatDuration, formatTime, friendlyError } from "./api";
-  import { formatLogLine, sourceLabel, statusLabel } from "./format";
+  import { exitCodeText, formatLogLine, sourceLabel, statusLabel } from "./format";
   import { t, tBackend } from "./i18n.svelte";
   import { createListenerGroup } from "./listeners";
   import Icon from "./Icon.svelte";
@@ -176,7 +176,7 @@
               <span class="badge">{sourceLabel(run.source)}</span>
               <span><span class="badge" class:ok={run.status === "running" || run.status === "exited"} class:bad={run.status === "failed"}>{statusLabel(run.status)}</span></span>
               <span class="cell-sub">{formatDuration(run.started_at, run.ended_at)}</span>
-              <span class="mono tiny">{run.exit_code ?? "—"}</span>
+              <span class="mono tiny">{exitCodeText(run.exit_code)}</span>
               <span class="right"><span class="log-open" role="button" tabindex="0" title={t("打开完整日志")} aria-label={t("打开完整日志")} onclick={(event) => { event.stopPropagation(); openFullLog(run); }} onkeydown={(event) => { if (event.key === "Enter") { event.stopPropagation(); openFullLog(run); } }}><Icon name="file" size={14} /></span></span>
             </button>
           {/each}
@@ -200,7 +200,7 @@
           <span>{t("来源")}</span><strong>{sourceLabel(selected.source)}</strong>
           <span>PID</span><strong>{selected.pid ?? "—"}</strong>
           <span>{t("耗时")}</span><strong>{formatDuration(selected.started_at, selected.ended_at)}</strong>
-          <span>{t("退出码")}</span><strong>{selected.exit_code ?? "—"}</strong>
+          <span>{t("退出码")}</span><strong>{exitCodeText(selected.exit_code)}</strong>
           <span>{t("停止原因")}</span><strong>{selected.stop_reason ? tBackend(selected.stop_reason) : "—"}</strong>
           <span>{t("峰值内存")}</span><strong>{formatBytes(selected.peak_memory_bytes)}</strong>
           <span>{t("CPU 时间")}</span><strong>{selected.cpu_time_ms != null ? `${(selected.cpu_time_ms / 1000).toFixed(1)}s` : "—"}</strong>

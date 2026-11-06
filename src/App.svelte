@@ -4,7 +4,7 @@
   import { getVersion } from "@tauri-apps/api/app";
   import { api, friendlyError } from "./lib/api";
   import { i18n, t } from "./lib/i18n.svelte";
-  import { applyRunState, isActiveStatus, isBusyStatus, scriptName, statusLabel } from "./lib/format";
+  import { applyRunState, isActiveStatus, isBusyStatus, isValidSuccessCodes, scriptName, statusLabel } from "./lib/format";
   import { createListenerGroup } from "./lib/listeners";
   import Schedules from "./lib/Schedules.svelte";
   import Triggers from "./lib/Triggers.svelte";
@@ -234,6 +234,10 @@
 
   async function saveEdit() {
     if (!editScript) return;
+    if (!isValidSuccessCodes(editScript.success_codes)) {
+      showToast(t("成功退出码格式无效，请填写 0-4294967295 或 0x 开头的十六进制"), "error");
+      return;
+    }
     try {
       const edit: ScriptEdit = {
         name: editScript.name,
@@ -626,7 +630,7 @@
               <option value="force">{t("立即强制终止")}</option>
             </select>
           </div>
-          <div class="field"><div class="label-row"><label class="label" for="edit-success">{t("成功退出码")}</label><Hint text={t("判定运行成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12。")} /></div><input id="edit-success" class="input mono" bind:value={editScript.success_codes} placeholder={t("0 或 0,2,10-12")} /></div>
+          <div class="field"><div class="label-row"><label class="label" for="edit-success">{t("成功退出码")}</label><Hint text={t("判定运行成功的退出码，多个用逗号分隔并支持区间，例如 0,2,10-12；Windows 大退出码可写十进制（如 3221225477）或十六进制（如 0xC0000005）。")} /></div><input id="edit-success" class="input mono" bind:value={editScript.success_codes} placeholder={t("0 或 0,2,10-12 或 0xC0000005")} /></div>
         </div>
         <div class="form-grid">
           <div class="field"><div class="label-row"><label class="label" for="edit-instance-policy">{t("实例策略")}</label><Hint text={t("同一脚本已有实例在运行时的处理方式：允许并行、跳过本次、排队等待，或停止旧实例后启动。")} /></div>

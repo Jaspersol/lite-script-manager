@@ -312,7 +312,17 @@ fn client_builder() -> reqwest::ClientBuilder {
             env!("CARGO_PKG_VERSION")
         ))
         .connect_timeout(Duration::from_secs(8))
-        .redirect(reqwest::redirect::Policy::limited(10))
+        // Redirects are re-validated: a GitHub URL must not hand the installer
+        // (or an API response) to a host outside the allowlist.
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 10 {
+                return attempt.error("重定向次数过多");
+            }
+            match validate_download_url(attempt.url().as_str()) {
+                Ok(()) => attempt.follow(),
+                Err(_) => attempt.error("更新重定向目标不在允许的 GitHub 域名内"),
+            }
+        }))
 }
 
 /// Client for short API calls.
@@ -484,25 +494,37 @@ async fn download_to_file(
     Ok((downloaded, hex_digest(&hasher.finalize())))
 }
 
+fn required_checksum(info: &UpdateInfo) -> Result<String, String> {
+    info.sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| {
+            "该版本没有提供 .sha256 校验文件，已取消安装（无法验证安装包完整性）".to_string()
+        })
+}
+
 /// Downloads the installer announced by the last check, verifies it and hands it to NSIS.
 pub async fn install_latest(app: AppHandle) -> Result<(), String> {
     let info = last_result().ok_or_else(|| "请先检查更新".to_string())?;
     if !info.has_update {
         return Err("当前已是最新版本".to_string());
     }
+    let expected_sha256 = required_checksum(&info)?;
     let url = info
         .download_url
         .ok_or_else(|| "该版本没有提供安装包".to_string())?;
     let file_name = info
         .asset_name
         .ok_or_else(|| "该版本没有提供安装包".to_string())?;
-    let expected_sha256 = info.sha256;
+    // Verification is mandatory: without a checksum the installer is never run.
     let mut candidates = vec![url];
     if let Some(mirror) = info.mirror_url.filter(|value| !value.trim().is_empty()) {
         candidates.push(mirror);
     }
-    if let Some(first) = candidates.first() {
-        validate_download_url(first)?;
+    for candidate in &candidates {
+        validate_download_url(candidate)?;
     }
     let dir = update_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建更新目录失败: {e}"))?;
@@ -517,12 +539,14 @@ pub async fn install_latest(app: AppHandle) -> Result<(), String> {
     })
     .await?;
 
-    if let Some(expected) = expected_sha256.filter(|value| !value.trim().is_empty())
-        && !digest.eq_ignore_ascii_case(expected.trim())
-    {
+    if digest != expected_sha256 {
         let _ = std::fs::remove_file(&target);
         return Err("更新包校验失败：SHA256 不匹配".to_string());
     }
+    // Residual risk: the hash comes from the same GitHub release as the asset,
+    // so it proves integrity but not publisher identity. Authenticode
+    // (WinVerifyTrust) is intentionally not checked here yet.
+    logging::app_log("INFO", &format!("更新包已通过 SHA256 校验 ({digest})"));
 
     let _ = app.emit(
         "update-progress",
@@ -605,9 +629,42 @@ pub fn open_release_page(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_newer, normalise_version, parse_digest, parse_version, safe_file_name,
-        validate_download_url,
+        UpdateInfo, is_newer, normalise_version, parse_digest, parse_version, required_checksum,
+        safe_file_name, validate_download_url,
     };
+
+    fn update_info(sha256: Option<&str>) -> UpdateInfo {
+        UpdateInfo {
+            current_version: "0.1.2".into(),
+            latest_version: "0.2.0".into(),
+            has_update: true,
+            release_name: None,
+            notes: None,
+            published_at: None,
+            release_url: None,
+            asset_name: Some("LiteScriptManager_0.2.0_x64-setup.exe".into()),
+            asset_size: Some(1024),
+            download_url: Some(
+                "https://github.com/Jaspersol/lite-script-manager/releases/download/v0.2.0/a.exe"
+                    .into(),
+            ),
+            mirror_url: None,
+            sha256: sha256.map(str::to_string),
+            checked_at: 0,
+        }
+    }
+
+    #[test]
+    fn install_requires_a_well_formed_checksum() {
+        let digest = "A".repeat(64);
+        assert_eq!(
+            required_checksum(&update_info(Some(&digest))).unwrap(),
+            "a".repeat(64)
+        );
+        assert!(required_checksum(&update_info(None)).is_err());
+        assert!(required_checksum(&update_info(Some(""))).is_err());
+        assert!(required_checksum(&update_info(Some("deadbeef"))).is_err());
+    }
 
     #[test]
     fn compares_versions() {
@@ -639,6 +696,9 @@ mod tests {
     fn only_allows_github_download_hosts() {
         assert!(validate_download_url("https://github.com/a/b/releases/download/v1/x.exe").is_ok());
         assert!(validate_download_url("https://objects.githubusercontent.com/x").is_ok());
+        // GitHub redirects release assets here; the parent domain allowlist must
+        // keep covering it or every installer download is rejected.
+        assert!(validate_download_url("https://release-assets.githubusercontent.com/x").is_ok());
         assert!(validate_download_url("http://github.com/a/b").is_err());
         assert!(validate_download_url("https://evil.example.com/github.com/x.exe").is_err());
         assert!(validate_download_url("https://github.com.evil.example/x.exe").is_err());
