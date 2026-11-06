@@ -152,7 +152,7 @@
     <div class="settings-grid">
       <section class="settings-card">
         <h3>{t("启动与窗口")}</h3>
-        <label class="setting-check"><input type="checkbox" checked={bool("start_with_windows")} onchange={(event) => setBool("start_with_windows", event.currentTarget.checked)} /> <span class="check-text">{t("开机启动 LiteScriptManager")}<Hint text={t("登录 Windows 后自动启动应用并常驻托盘。")} /></span></label>
+        <label class="setting-check"><input type="checkbox" checked={bool("start_with_windows")} onchange={(event) => setBool("start_with_windows", event.currentTarget.checked)} /> <span class="check-text">{t("开机启动 LSM")}<Hint text={t("登录 Windows 后自动启动应用并常驻托盘。")} /></span></label>
         <label class="setting-check"><input type="checkbox" checked={bool("open_panel_on_start")} onchange={(event) => setBool("open_panel_on_start", event.currentTarget.checked)} /> <span class="check-text">{t("启动时打开快捷面板")}<Hint text={t("应用启动后立即弹出快捷面板；关闭后仍可从托盘或快捷键再次打开。")} /></span></label>
         <label class="setting-check"><input type="checkbox" checked={bool("close_main_exits")} onchange={(event) => setBool("close_main_exits", event.currentTarget.checked)} /> <span class="check-text">{t("关闭主窗口时退出应用并停止全部脚本")}<Hint text={t("勾选后关闭主窗口即退出应用并停止全部受管脚本；不勾选时应用常驻托盘，脚本继续运行。")} /></span></label>
         <div class="field">
@@ -205,8 +205,8 @@
         <div class="label-row"><h3>{t("关于与更新")}</h3><Hint text={t("点击「检查更新」从 GitHub Releases 获取最新版本；下载完成后会以静默方式安装并重启应用。")} /></div>
         <div class="about-row">
           <div>
-            <div class="about-name">LiteScriptManager <span class="version-badge">v{appVersion || updateInfo?.current_version || "—"}</span></div>
-            <div class="muted tiny">{t("更新来自 GitHub Releases（Jaspersol/LiteScriptManager）")}</div>
+            <div class="about-name">LSM <span class="version-badge">v{appVersion || updateInfo?.current_version || "—"}</span></div>
+            <div class="muted tiny">{t("更新来自 GitHub Releases（Jaspersol/Lite-script-manager）")}</div>
           </div>
           <button class="btn btn-sm" disabled={checking || installing} onclick={checkUpdate}>
             <Icon name="refresh" size={14} /> {checking ? t("检查中…") : t("检查更新")}

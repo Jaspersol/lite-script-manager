@@ -129,7 +129,7 @@ export const app: Record<string, string> = {
 
   // first run modal
   首次启动: "First launch",
-  "欢迎使用 LiteScriptManager": "Welcome to LiteScriptManager",
+  "欢迎使用 LSM": "Welcome to LSM",
   "托盘常驻、按需创建 WebView。关闭窗口不会停止脚本，退出应用才会停止全部受管进程。": "Runs in the tray and creates the WebView on demand. Closing the window does not stop scripts. Quitting the app stops all managed processes.",
   "1. 添加脚本": "1. Add scripts",
   "支持 14 种运行时，自动检测解释器，不安装、不修改 PATH。": "14 runtimes supported. Interpreters are detected automatically; nothing is installed and PATH is not modified.",

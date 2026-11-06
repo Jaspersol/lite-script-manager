@@ -101,7 +101,7 @@
     <header class="panel-head">
       <div class="panel-title">
         <span class="logo-mark">LS</span>
-        <span>LiteScriptManager</span>
+        <span>LSM</span>
       </div>
       <div class="panel-head-actions">
         <span class="count-badge">{scripts.length}</span>
@@ -172,7 +172,7 @@
   .panel-title { display: flex; align-items: center; gap: 9px; font-size: 13px; font-weight: 600; letter-spacing: -.1px; color: #363c45; }
   .logo-mark {
     width: 25px; height: 25px; display: grid; place-items: center; border-radius: 8px;
-    background: #e9effc; color: #526fae; font-size: 8.5px; font-weight: 700; letter-spacing: -.2px;
+    background: #e9effc; color: #526fae; font-size: 7.5px; font-weight: 700; letter-spacing: -.2px;
   }
   .panel-head-actions { display: flex; align-items: center; gap: 6px; }
   .count-badge {

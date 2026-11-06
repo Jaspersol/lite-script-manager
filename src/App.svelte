@@ -371,14 +371,14 @@
   });
 </script>
 
-<svelte:head><title>LiteScriptManager</title></svelte:head>
+<svelte:head><title>LSM</title></svelte:head>
 
 <div class="shell">
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">LS</div>
+      <div class="brand-mark">LSM</div>
       <div>
-        <div class="brand-name">LiteScriptManager</div>
+        <div class="brand-name">LSM</div>
         <div class="brand-sub">{t("轻量脚本管理器")}</div>
       </div>
     </div>
@@ -656,7 +656,7 @@
 {#if firstRun}
   <div class="modal-backdrop" role="presentation">
     <div class="modal" role="dialog" aria-modal="true" aria-label={t("首次启动")}>
-      <div class="modal-head"><div class="modal-title">{t("欢迎使用 LiteScriptManager")}</div></div>
+      <div class="modal-head"><div class="modal-title">{t("欢迎使用 LSM")}</div></div>
       <div class="modal-body">
         <p class="first-run-lead">{t("托盘常驻、按需创建 WebView。关闭窗口不会停止脚本，退出应用才会停止全部受管进程。")}</p>
         <div class="first-run-list">
@@ -691,7 +691,7 @@
   .brand { display: flex; gap: 10px; align-items: center; padding: 4px 8px 26px; }
   .brand-mark {
     width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center;
-    background: #e8eefb; color: #4a6bb8; font-weight: 700; font-size: 10.5px; letter-spacing: -.2px;
+    background: #e8eefb; color: #4a6bb8; font-weight: 700; font-size: 9px; letter-spacing: -.2px;
   }
   .brand-name { font-size: 13px; font-weight: 600; letter-spacing: -.1px; color: #2f343c; }
   .brand-sub { color: #959ca7; font-size: 10.5px; margin-top: 3px; letter-spacing: .1px; }

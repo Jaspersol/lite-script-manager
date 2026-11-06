@@ -409,7 +409,7 @@ fn effective_conditions(config: &TriggerConfig) -> Vec<Condition> {
 
 pub(crate) fn notify(app: &AppHandle, title: &str, message: &str) {
     let title = if title.trim().is_empty() {
-        "LiteScriptManager"
+        "LSM"
     } else {
         title
     };

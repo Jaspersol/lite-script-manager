@@ -33,7 +33,7 @@ pub fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
     let mut builder = TrayIconBuilder::with_id("lsm-tray")
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("LiteScriptManager")
+        .tooltip("LSM")
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
@@ -69,14 +69,14 @@ pub fn notify_new_version(app: &AppHandle, latest_version: &str) {
             app,
             "New version available",
             &format!(
-                "LiteScriptManager v{latest_version} is available. Install it from Settings → About & updates"
+                "LSM v{latest_version} is available. Install it from Settings → About & updates"
             ),
         );
     } else {
         crate::triggers::notify(
             app,
             "发现新版本",
-            &format!("LiteScriptManager v{latest_version} 已发布，可在「设置 → 关于与更新」中安装"),
+            &format!("LSM v{latest_version} 已发布，可在「设置 → 关于与更新」中安装"),
         );
     }
 }
@@ -152,7 +152,7 @@ pub fn ensure_panel(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     }
 
     let window = WebviewWindowBuilder::new(app, PANEL_LABEL, WebviewUrl::App("panel.html".into()))
-        .title("LiteScriptManager")
+        .title("LSM")
         .inner_size(PANEL_WIDTH, PANEL_HEIGHT)
         .decorations(false)
         .always_on_top(true)
@@ -233,7 +233,7 @@ pub fn ensure_main(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     }
 
     let window = WebviewWindowBuilder::new(app, MAIN_LABEL, WebviewUrl::App("index.html".into()))
-        .title("LiteScriptManager")
+        .title("LSM")
         .inner_size(1120.0, 760.0)
         .min_inner_size(900.0, 620.0)
         .center()
