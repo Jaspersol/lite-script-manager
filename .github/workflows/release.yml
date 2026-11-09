@@ -57,10 +57,27 @@ jobs:
             (($lines -join "`n") + "`n"),
             [System.Text.UTF8Encoding]::new($false))
 
+      # The notes come from the repository, one file per tag, so a published
+      # release can be reviewed and corrected like anything else. The file is
+      # bilingual with 简体中文 inside it, matching the earlier releases. A tag
+      # without a file still publishes, with the tag name as its notes.
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          notes=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes" ]; then
+            echo "path=$notes" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Release %s.\n' "${GITHUB_REF_NAME}" > release-notes.md
+            echo "path=release-notes.md" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: softprops/action-gh-release@v2
         with:
+          name: LiteScriptManager ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
             src-tauri/target/release/bundle/nsis/*.exe.sha256
             src-tauri/target/release/bundle/nsis/SHA256SUMS.txt
-          generate_release_notes: true
