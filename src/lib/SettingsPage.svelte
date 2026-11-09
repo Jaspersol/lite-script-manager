@@ -28,6 +28,10 @@
   let installing = $state(false);
   let progress: UpdateProgress | null = $state(null);
 
+  let checkStarted = false;
+
+  let disposed = false;
+
   const percent = $derived.by(() => {
     if (!progress || !progress.total) return null;
     return Math.min(100, Math.round((progress.downloaded / progress.total) * 100));
@@ -35,11 +39,12 @@
 
   async function load() {
     try {
-      values = await api.getSettings();
+      const loaded = await api.getSettings();
+      if (!disposed) values = loaded;
     } catch (error) {
-      notify(friendlyError(error), "error");
+      if (!disposed) notify(friendlyError(error), "error");
     } finally {
-      loading = false;
+      if (!disposed) loading = false;
     }
   }
 
@@ -56,18 +61,21 @@
   }
 
   async function checkUpdate() {
+    checkStarted = true;
     checking = true;
     updateError = "";
     installError = "";
     try {
       const info = await api.checkUpdate();
+      if (disposed) return;
       updateInfo = info;
       if (!info.has_update) notify(t("已是最新版本"));
     } catch (error) {
+      if (disposed) return;
       updateInfo = null;
       updateError = friendlyError(error);
     } finally {
-      checking = false;
+      if (!disposed) checking = false;
     }
   }
 
@@ -128,9 +136,9 @@
 
   onMount(() => {
     load();
-    getVersion().then((value) => { appVersion = value; }).catch(() => {});
-    // Show the result of the startup check even though its event fired before this window existed.
+    getVersion().then((value) => { if (!disposed) appVersion = value; }).catch(() => {});
     api.lastUpdateResult().then((info) => {
+      if (disposed || checkStarted) return;
       if (info && !updateInfo) updateInfo = info;
     }).catch(() => {});
     const listeners = createListenerGroup();
@@ -141,7 +149,10 @@
       updateError = "";
       installError = "";
     });
-    return () => listeners.dispose();
+    return () => {
+      disposed = true;
+      listeners.dispose();
+    };
   });
 </script>
 
