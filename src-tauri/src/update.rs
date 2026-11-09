@@ -65,7 +65,7 @@ struct ProgressPayload {
 
 /// Runs an update check on behalf of the UI and records the timestamp.
 pub async fn check(app: &AppHandle) -> Result<UpdateInfo, String> {
-    let info = fetch_latest(app).await?;
+    let info = fetch_latest_with_fallback(app).await?;
     record_check(app);
     cache(&info);
     Ok(info)
@@ -84,7 +84,7 @@ pub async fn auto_check(app: &AppHandle) -> Result<Option<UpdateInfo>, String> {
             return Ok(None);
         }
     }
-    match fetch_latest(app).await {
+    match fetch_latest_with_fallback(app).await {
         Ok(info) => {
             record_check(app);
             cache(&info);
@@ -149,6 +149,176 @@ async fn fetch_latest(app: &AppHandle) -> Result<UpdateInfo, String> {
         info.sha256 = Some(checksum);
     }
     Ok(info)
+}
+
+fn release_page_url() -> String {
+    format!("https://github.com/{REPO}/releases/latest")
+}
+
+fn latest_asset_url() -> String {
+    format!("https://github.com/{REPO}/releases/latest/download/")
+}
+
+/// The checksum manifest the partner-scheme fallback reads to learn the
+/// installer name and its SHA256 without the (rate-limited) GitHub REST API.
+const CHECKSUMS_ASSET: &str = "SHA256SUMS.txt";
+
+/// Primary check first (the GitHub REST API, unchanged). On any failure it
+/// retries with the partner-project scheme, which never touches api.github.com.
+/// Both the settings-page check and the startup auto-check go through here.
+async fn fetch_latest_with_fallback(app: &AppHandle) -> Result<UpdateInfo, String> {
+    match fetch_latest(app).await {
+        Ok(info) => Ok(info),
+        Err(primary) => {
+            logging::app_log(
+                "WARN",
+                &format!("检查更新主路径失败，切换备用方案: {primary}"),
+            );
+            match fetch_latest_fallback(app).await {
+                Ok(info) => {
+                    logging::app_log("INFO", "已通过备用方案完成检查更新");
+                    Ok(info)
+                }
+                Err(fallback) => {
+                    logging::app_log("WARN", &format!("备用方案同样失败: {fallback}"));
+                    Err(fallback)
+                }
+            }
+        }
+    }
+}
+
+/// Fallback ported from the partner project. The GitHub REST API allows only
+/// 60 calls/hour per IP, and a shared connection often answers 403 — which used
+/// to leave the check unable to run at all. This path never calls the API: it
+/// reads the version tag from the plain `releases/latest` redirect, and the
+/// installer name + SHA256 from the release's SHA256SUMS.txt, then builds direct
+/// `releases/latest/download/<asset>` URLs, verified at install time as usual.
+async fn fetch_latest_fallback(app: &AppHandle) -> Result<UpdateInfo, String> {
+    let client = http_client()?;
+    let tag = fallback_latest_tag(&client).await?;
+    let current = app.package_info().version.to_string();
+    let latest = normalise_version(&tag);
+    let has_update = is_newer(&current, &latest);
+    let release_url = format!("https://github.com/{REPO}/releases/tag/{tag}");
+
+    let mut info = UpdateInfo {
+        current_version: current,
+        latest_version: if latest.is_empty() {
+            tag.clone()
+        } else {
+            latest
+        },
+        has_update,
+        release_name: Some(tag.clone()),
+        notes: None,
+        published_at: None,
+        release_url: Some(release_url),
+        asset_name: None,
+        asset_size: None,
+        download_url: None,
+        mirror_url: None,
+        sha256: None,
+        checked_at: db::now_ms(),
+    };
+
+    if !has_update {
+        return Ok(info);
+    }
+
+    // SHA256SUMS.txt is the only asset name discoverable without the API: its
+    // `.exe` line names the installer and carries the hash to verify against.
+    let checksums_url = format!("{}{CHECKSUMS_ASSET}", latest_asset_url());
+    let response = client
+        .get(&checksums_url)
+        .send()
+        .await
+        .map_err(|e| format!("连接 GitHub 失败: {}", describe_error(&e)))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("检查更新失败：HTTP {}", status.as_u16()));
+    }
+    let text = response
+        .text()
+        .await
+        .map_err(|e| format!("解析发布信息失败: {e}"))?;
+    let (name, sha256) = installer_from_checksums(&text)
+        .ok_or_else(|| "该版本没有提供安装包".to_string())?;
+
+    info.asset_name = Some(name.clone());
+    info.sha256 = Some(sha256);
+    info.download_url = Some(format!("{}{name}", latest_asset_url()));
+    info.mirror_url = Some(format!(
+        "https://github.com/{REPO}/releases/download/{tag}/{name}"
+    ));
+    Ok(info)
+}
+
+/// Reads the tag from the plain `releases/latest` page. GitHub answers with a
+/// redirect to `releases/tag/<tag>`; reqwest has followed it, so the final URL
+/// names the tag. No API JSON is involved and no quota is consumed.
+async fn fallback_latest_tag(client: &reqwest::Client) -> Result<String, String> {
+    let response = client
+        .get(release_page_url())
+        .send()
+        .await
+        .map_err(|e| format!("连接 GitHub 失败: {}", describe_error(&e)))?;
+    if let Some(tag) = tag_from_release_url(response.url().as_str()) {
+        return Ok(tag);
+    }
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err("GitHub 仓库还没有发布任何版本".to_string());
+    }
+    Err("最新发布没有可识别的版本号".to_string())
+}
+
+/// Reads `<tag>` out of a `…/releases/tag/<tag>` URL — either the final target
+/// of `releases/latest` or the API's `html_url`. Query strings are ignored.
+fn tag_from_release_url(url: &str) -> Option<String> {
+    const MARKER: &str = "/releases/tag/";
+    let path = url.split(['?', '#']).next()?;
+    let marker = path.rfind(MARKER)?;
+    let tag = path[marker + MARKER.len()..].trim_end_matches('/');
+    if tag.is_empty() {
+        return None;
+    }
+    Some(tag.to_string())
+}
+
+/// Finds the `.exe` line in a SHA256SUMS.txt-style manifest, returning
+/// `(file name, sha256)`. Accepts both `<hash>  <name>` and `<hash> *<name>`.
+fn installer_from_checksums(text: &str) -> Option<(String, String)> {
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r').trim();
+        let Some(split) = line.find(|c: char| c == ' ' || c == '\t') else {
+            continue;
+        };
+        if split == 0 {
+            continue;
+        }
+        let hash = line[..split].trim();
+        let name = line[split..].trim().trim_start_matches('*').trim();
+        let valid_name = !name.is_empty()
+            && !name.contains(['/', '\\'])
+            && name.to_ascii_lowercase().ends_with(".exe");
+        if hash.len() == 64
+            && hash.chars().all(|c| c.is_ascii_hexdigit())
+            && valid_name
+        {
+            return Some((name.to_string(), hash.to_ascii_lowercase()));
+        }
+    }
+    None
+}
+
+/// Partner-scheme fallback for the download step: `releases/latest/download/<name>`
+/// serves the asset over plain github.com with no REST API. It is appended last,
+/// so open_stream only reaches it after every primary candidate has failed.
+fn partner_download_url(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains(['/', '\\']) {
+        return None;
+    }
+    Some(format!("{}{name}", latest_asset_url()))
 }
 
 fn parse_release(current: &str, body: &serde_json::Value) -> UpdateInfo {
@@ -523,6 +693,15 @@ pub async fn install_latest(app: AppHandle) -> Result<(), String> {
     if let Some(mirror) = info.mirror_url.filter(|value| !value.trim().is_empty()) {
         candidates.push(mirror);
     }
+
+    // Partner-scheme fallback for the download: `releases/latest/download/<name>`
+    // serves the asset over plain github.com without the REST API. Appended last,
+    // so it is tried only after every primary candidate above has failed.
+    if let Some(fallback) = partner_download_url(&file_name) {
+        if !candidates.contains(&fallback) {
+            candidates.push(fallback);
+        }
+    }
     for candidate in &candidates {
         validate_download_url(candidate)?;
     }
@@ -629,8 +808,9 @@ pub fn open_release_page(url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        UpdateInfo, is_newer, normalise_version, parse_digest, parse_version, required_checksum,
-        safe_file_name, validate_download_url,
+        UpdateInfo, installer_from_checksums, is_newer, normalise_version, parse_digest,
+        parse_version, partner_download_url, required_checksum, safe_file_name,
+        tag_from_release_url, validate_download_url,
     };
 
     fn update_info(sha256: Option<&str>) -> UpdateInfo {
@@ -742,6 +922,67 @@ mod tests {
             Some(digest.clone())
         );
         assert_eq!(parse_digest("not a checksum"), None);
+    }
+
+    #[test]
+    fn reads_the_tag_from_a_release_url() {
+        assert_eq!(
+            tag_from_release_url(
+                "https://github.com/Jaspersol/lite-script-manager/releases/tag/v0.2.0"
+            ),
+            Some("v0.2.0".to_string())
+        );
+        assert_eq!(
+            tag_from_release_url(
+                "https://github.com/Jaspersol/lite-script-manager/releases/tag/v1.2.3?x=1"
+            ),
+            Some("v1.2.3".to_string())
+        );
+        // `releases/latest` with no redirect names no tag.
+        assert_eq!(
+            tag_from_release_url(
+                "https://github.com/Jaspersol/lite-script-manager/releases/latest"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_the_checksum_manifest() {
+        let hash = "a".repeat(64);
+        let names = [
+            "THIRD-PARTY-NOTICES.md",
+            "LiteScriptManager_0.2.0_x64-setup.exe.sha256",
+            "LiteScriptManager_0.2.0_x64-setup.exe",
+        ];
+        let text = names
+            .iter()
+            .map(|name| format!("{hash}  {name}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            installer_from_checksums(&text),
+            Some((
+                "LiteScriptManager_0.2.0_x64-setup.exe".to_string(),
+                hash.clone()
+            ))
+        );
+        // Binary-marker form (`<hash> *<name>`) is accepted too.
+        assert_eq!(
+            installer_from_checksums(&format!("{hash} *setup.exe\r\n")),
+            Some(("setup.exe".to_string(), hash.clone()))
+        );
+        assert_eq!(installer_from_checksums("not a checksum"), None);
+    }
+
+    #[test]
+    fn fallback_download_url_stays_on_github() {
+        let url = partner_download_url("LiteScriptManager_0.2.0_x64-setup.exe")
+            .expect("a fallback url");
+        assert!(validate_download_url(&url).is_ok());
+        assert!(url.contains("/releases/latest/download/"));
+        assert!(partner_download_url("../../etc/passwd").is_none());
+        assert!(partner_download_url("").is_none());
     }
 }
 

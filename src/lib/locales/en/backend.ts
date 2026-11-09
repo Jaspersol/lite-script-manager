@@ -98,6 +98,8 @@ export const backend: Record<string, string> = {
   "检查更新失败：HTTP {status}": "Update check failed: HTTP {status}",
   检查更新失败: "Update check failed",
   解析发布信息失败: "Failed to parse release information",
+  // update.rs — partner fallback (plain github.com, no REST API)
+  "最新发布没有可识别的版本号": "The latest release has no recognizable version",
   初始化网络客户端失败: "Failed to initialize network client",
   "更新地址必须是 HTTPS": "The update URL must use HTTPS",
   "更新地址不在允许的 GitHub 域名内": "The update URL is not on an allowed GitHub domain",
