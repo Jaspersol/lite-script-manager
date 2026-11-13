@@ -442,23 +442,32 @@ async fn get_run_log(
         .map_err(|e| format!("读取日志任务失败: {e}"))?
 }
 
-#[cfg(windows)]
-pub(crate) fn spawn_opener(program: &str, path: &str) -> Result<(), String> {
-    // Used by the updater module as well.
+/// Launches a helper whose output nobody reads. Standard streams are
+/// explicitly null on purpose: Rust's spawn makes inherited std handles
+/// inheritable, so a slot holding a handle this process cannot use — the
+/// app's stdin after the console it was started from went away — fails with
+/// `ERROR_INVALID_HANDLE` before the child exists.
+fn spawn_silent(program: &str, arg: &str) -> Result<(), String> {
+    use std::process::Stdio;
     std::process::Command::new(program)
-        .arg(path)
+        .arg(arg)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("打开文件失败: {e}"))
 }
 
+#[cfg(windows)]
+pub(crate) fn spawn_opener(program: &str, path: &str) -> Result<(), String> {
+    // Used by the updater module as well.
+    spawn_silent(program, path)
+}
+
 #[cfg(not(windows))]
 pub(crate) fn spawn_opener(_program: &str, path: &str) -> Result<(), String> {
-    std::process::Command::new("xdg-open")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("打开文件失败: {e}"))
+    spawn_silent("xdg-open", path)
 }
 
 #[tauri::command]
@@ -988,5 +997,76 @@ mod tests {
         let lines = read_log_tail(path.to_str().unwrap(), 2).expect("read tail");
         assert_eq!(lines, vec!["second".to_string(), "third".to_string()]);
         std::fs::remove_file(path).expect("remove log");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::spawn_silent;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_INPUT_HANDLE, SetStdHandle};
+
+    const CHILD_ENV: &str = "LSM_DEAD_STD_HANDLE_CHILD";
+    const TEST_NAME: &str = "windows_tests::opener_spawns_with_a_dead_inherited_std_handle";
+
+    /// Restores whatever the harness had installed, even on panic.
+    struct RestoreStdHandle {
+        saved: (u32, HANDLE),
+    }
+
+    impl Drop for RestoreStdHandle {
+        fn drop(&mut self) {
+            unsafe { SetStdHandle(self.saved.0, self.saved.1) };
+        }
+    }
+
+    /// Regression: "编辑" reported `打开文件失败: 句柄无效。 (os error 6)`.
+    /// The app's stdin slot held a handle the process could no longer use, and
+    /// Rust's spawn makes inherited std handles inheritable, so the opener's
+    /// `CreateProcess` failed before Notepad started. Null stdio avoids it.
+    ///
+    /// Std handles are per process, so the corruption runs in a child copy of
+    /// this test binary; leaving it installed in the harness process would
+    /// break every other test that spawns with inherited stdio.
+    #[test]
+    fn opener_spawns_with_a_dead_inherited_std_handle() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let exe = std::env::current_exe().expect("current test binary");
+            let output = std::process::Command::new(exe)
+                .args(["--exact", TEST_NAME])
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("re-run this test in a child process");
+            assert!(
+                output.status.success(),
+                "isolated run failed:\n{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        let slot = STD_INPUT_HANDLE;
+        let _restore = RestoreStdHandle {
+            saved: (slot, unsafe { GetStdHandle(slot) }),
+        };
+        // Install a real handle, then close it: the slot keeps the stale value,
+        // which is exactly the state the app was in when the edit failed.
+        let file =
+            std::fs::File::open(std::env::current_exe().expect("current exe")).expect("open exe");
+        let handle = file.as_raw_handle() as HANDLE;
+        unsafe { SetStdHandle(slot, handle) };
+        drop(file);
+        assert_eq!(
+            unsafe { GetStdHandle(slot) },
+            handle,
+            "the closed handle stays in the slot"
+        );
+
+        let program =
+            std::env::var("COMSPEC").unwrap_or_else(|_| r"C:\Windows\System32\cmd.exe".into());
+        spawn_silent(&program, "/c")
+            .expect("the opener must not depend on the inherited std handles");
     }
 }
